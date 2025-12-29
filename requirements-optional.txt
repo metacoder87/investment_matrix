@@ -1,0 +1,8 @@
+# Optional data sources / plugins (not required for the zero-cost core).
+newsapi-python==0.2.7
+praw==7.8.1
+web3
+
+# Optional wallet utilities (not required for the zero-cost core).
+# Note: may require build tools (gcc) on linux during install.
+bip_utils

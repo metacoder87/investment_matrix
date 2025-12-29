@@ -1,0 +1,97 @@
+services:
+  db:
+    image: timescale/timescaledb-ha:pg16
+    environment:
+      POSTGRES_DB: cryptoinsight
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d cryptoinsight"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+  migrate:
+    build: .
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head"
+  api:
+    build: .
+    env_file:
+      - .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "uvicorn app.main:app --host 0.0.0.0 --port 8000"
+  worker:
+    build: .
+    env_file:
+      - .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    command: >
+      sh -c "celery -A celery_app worker --loglevel=info"
+  streamer:
+    build: .
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    command: >
+      sh -c "python -m app.streamer"
+  writer:
+    build: .
+    env_file:
+      - .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    command: >
+      sh -c "python -m app.writer"
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000/api
+    depends_on:
+      - api
+
+volumes:
+  db_data:
