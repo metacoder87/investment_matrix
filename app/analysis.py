@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pandas as pd
-import pandas_ta as ta
 
 
 def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:

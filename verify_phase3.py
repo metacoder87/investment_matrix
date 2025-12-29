@@ -1,7 +1,6 @@
 
-from app.connectors.sentiment import Sentiment, FearAndGreedConnector
+from app.connectors.sentiment import FearAndGreedConnector
 from app.connectors.fundamental import CoinGeckoConnector
-import json
 
 def test_connectors():
     print("Testing Sentiment & Fundamental Connectors...")

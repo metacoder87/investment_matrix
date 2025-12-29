@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 
 def calculate_risk_metrics(df: pd.DataFrame, risk_free_rate: float = 0.04) -> dict:
     """

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from contextlib import asynccontextmanager
 import json
 from datetime import datetime, timedelta, timezone
@@ -8,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 from celery.result import AsyncResult
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
-from fastapi.responses import RedirectResponse
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
