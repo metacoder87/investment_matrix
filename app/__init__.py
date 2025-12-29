@@ -1,0 +1,2 @@
+"""CryptoInsight application package."""
+
