@@ -1,0 +1,36 @@
+# Backend & API
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+alembic
+pydantic-settings
+celery
+redis
+requests
+
+# Data & Analysis
+numpy
+pandas
+ccxt==4.5.26
+pycoingecko==3.2.0
+pandas-ta
+scikit-learn
+scipy
+
+# Frontend
+solara
+plotly
+plotly-resampler
+anywidget
+
+# Security
+cryptography
+keyring
+
+# For testing
+pytest
+httpx
+
+# Lint (CI)
+ruff
