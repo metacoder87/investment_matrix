@@ -81,8 +81,6 @@ def calculate_risk_metrics(df: pd.DataFrame, risk_free_rate: float = 0.04) -> di
         metrics["sharpe_ratio"] = 0.0
 
     # 3. Sortino Ratio (Excess Return / Downside Deviation)
-    downside_returns = excess_returns[excess_returns < 0]
-    std_downside = downside_returns.std(ddof=1) # Sample std deviation of negative returns only? 
     # Usually Sortino uses root mean squared of downside deviations
     # Let's use standard formula: sqrt(mean(downside^2))
     
@@ -105,7 +103,7 @@ def calculate_risk_metrics(df: pd.DataFrame, risk_free_rate: float = 0.04) -> di
     metrics["max_drawdown"] = round(max_dd, 4)
     
     # 5. Calmar Ratio (Annualized Return / Max Drawdown)
-    total_return = (close.iloc[-1] / close.iloc[0]) - 1
+
     # Annualized return (CAGR equivalent for the period)
     # time_in_years = len(df) / ann_factor
     # cagr = (1 + total_return) ** (1/time_in_years) - 1

@@ -69,7 +69,7 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # --- 5. Cycles ---
     try:
         df.ta.ebsw(append=True)
-    except:
+    except Exception:
         pass
 
     # --- Backwards Compatibility Renames ---
