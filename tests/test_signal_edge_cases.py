@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 from unittest.mock import MagicMock
-from app.signals.engine import SignalEngine, Signal, SignalType
+from app.signals.engine import SignalEngine
 from app.connectors.sentiment import Sentiment
 
 @pytest.fixture

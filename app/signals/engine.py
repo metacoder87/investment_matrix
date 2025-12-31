@@ -195,8 +195,8 @@ class SignalEngine:
                 sell_signals.append(0.3)
                 reasons.append("Strong bear trend (EMA 9<21<55)")
 
-        # SuperTrend
-        st = latest.get("SUPERT_7_3.0") # pandas-ta default name might change, robust check needed
+        # SuperTrend logic (if we wanted to use it)
+        # st = latest.get("SUPERT_7_3.0") # pandas-ta default name might change
         # Often returns SUPERT_7_3.0, SUPERTd_7_3.0, SUPERTl_7_3.0, SUPERTs_7_3.0
         # We need the direction (1 or -1) usually in SUPERTd
         st_dir = latest.get("SUPERTd_10_3.0") 
@@ -219,8 +219,10 @@ class SignalEngine:
         adx = latest.get("ADX_14")
         if pd.notna(adx) and adx > 25:
              # Strong trend existing, amplifies other signals
-             for i in range(len(buy_signals)): buy_signals[i] *= 1.2
-             for i in range(len(sell_signals)): sell_signals[i] *= 1.2
+             for i in range(len(buy_signals)):
+                 buy_signals[i] *= 1.2
+             for i in range(len(sell_signals)):
+                 sell_signals[i] *= 1.2
              reasons.append(f"Strong Trend (ADX {adx:.1f})")
 
         # --- 3. VOLATILITY ---
@@ -312,8 +314,10 @@ class SignalEngine:
              cp = CoinPaprikaConnector()
              # Try to map symbol to ID broadly
              cp_id = symbol.lower()
-             if "btc" in cp_id: cp_id = "btc-bitcoin"
-             elif "eth" in cp_id: cp_id = "eth-ethereum"
+             if "btc" in cp_id:
+                 cp_id = "btc-bitcoin"
+             elif "eth" in cp_id:
+                 cp_id = "eth-ethereum"
              
              if "-" in cp_id:
                  events_res = cp.get_news(cp_id)
@@ -335,7 +339,8 @@ class SignalEngine:
                                      elif "launch" in evt.get("name", "").lower():
                                          buy_signals.append(0.1)
                                          reasons.append(f"Launch Event: {evt.get('name')}")
-                             except: pass
+                             except Exception:
+                                 pass
 
              # FMP Simple Headline Scrape
              fmp = FinancialModelingPrepConnector()
@@ -347,8 +352,10 @@ class SignalEngine:
                   sentiment_score = 0
                   for article in fmp_news[:5]:
                       title = article.get("title", "").lower()
-                      if any(k in title for k in bullish_kw): sentiment_score += 1
-                      if any(k in title for k in bearish_kw): sentiment_score -= 1
+                      if any(k in title for k in bullish_kw):
+                          sentiment_score += 1
+                      if any(k in title for k in bearish_kw):
+                          sentiment_score -= 1
                   
                   if sentiment_score >= 2:
                       buy_signals.append(0.1)
@@ -410,7 +417,7 @@ class SignalEngine:
                      val = float(v)
                      if pd.notna(val):
                          indicators[k] = round(val, 4)
-                 except:
+                 except Exception:
                      pass
 
         if not reasons:
