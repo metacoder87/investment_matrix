@@ -36,7 +36,8 @@ async def verify_sources():
         if status == "ok":
              events = res.get("events", [])
              print(f"✅ CoinPaprika: Found {len(events)} events")
-             if events: print(f"   Sample: {events[0].get('name')} - {events[0].get('date')}")
+             if events:
+                 print(f"   Sample: {events[0].get('name')} - {events[0].get('date')}")
         elif status == "not_found":
              print("⚠️ CoinPaprika: Coin ID not found (expected for some inputs)")
         else:
@@ -51,7 +52,8 @@ async def verify_sources():
         res = fmp.get_crypto_news("BTC")
         if isinstance(res, list):
             print(f"✅ FMP: Found {len(res)} articles")
-            if res: print(f"   Sample: {res[0].get('title')}")
+            if res:
+                print(f"   Sample: {res[0].get('title')}")
         else:
             print(f"❌ FMP: Unexpected response - {res}")
     except Exception as e:

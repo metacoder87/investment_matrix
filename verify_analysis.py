@@ -24,7 +24,7 @@ def test_indicators():
     print(f"Output columns: {len(df.columns)}")
     print(f"Columns: {df.columns.tolist()}")
     
-    expected = ["rsi", "macd", "bbands_upper", "stoch_k", "tsi", "ao", "sup_t"]
+
     
     # Check for a few key ones (fuzzy match because names vary)
     found_count = 0
