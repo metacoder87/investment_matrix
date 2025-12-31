@@ -25,6 +25,7 @@ from app.redis_client import redis_client
 from app.models.market import MarketTrade
 from app.models.instrument import Price
 from celery_app import celery_app
+from app.signals.engine import SignalEngine
 from database import get_db, init_db
 
 
@@ -541,23 +542,23 @@ def create_app() -> FastAPI:
                 )
                 for row in rows:
                     bucket = row.get("bucket")
-                    o = row.get("open")
-                    h = row.get("high")
-                    l = row.get("low")
-                    c = row.get("close")
-                    v = row.get("volume")
-                    n = row.get("trades")
-                    if bucket is None or o is None or h is None or l is None or c is None:
+                    open_p = row.get("open")
+                    high_p = row.get("high")
+                    low_p = row.get("low")
+                    close_p = row.get("close")
+                    volume = row.get("volume")
+                    trades = row.get("trades")
+                    if bucket is None or open_p is None or high_p is None or low_p is None or close_p is None:
                         continue
                     candles.append(
                         {
                             "timestamp": bucket.isoformat(),
-                            "open": float(o),
-                            "high": float(h),
-                            "low": float(l),
-                            "close": float(c),
-                            "volume": float(v) if v is not None else 0.0,
-                            "trades": int(n) if n is not None else 0,
+                            "open": float(open_p),
+                            "high": float(high_p),
+                            "low": float(low_p),
+                            "close": float(close_p),
+                            "volume": float(volume) if volume is not None else 0.0,
+                            "trades": int(trades) if trades is not None else 0,
                         }
                     )
             except Exception:
@@ -630,27 +631,27 @@ def create_app() -> FastAPI:
 
                 bucket_epoch = int(ts.timestamp() // bucket_seconds) * bucket_seconds
                 item = buckets.get(bucket_epoch)
-                o = float(row.open) if row.open else 0.0
-                h = float(row.high) if row.high else 0.0
-                l = float(row.low) if row.low else 0.0
-                c = float(row.close) if row.close else 0.0
-                v = float(row.volume) if row.volume else 0.0
+                open_p = float(row.open) if row.open else 0.0
+                high_p = float(row.high) if row.high else 0.0
+                low_p = float(row.low) if row.low else 0.0
+                close_p = float(row.close) if row.close else 0.0
+                volume = float(row.volume) if row.volume else 0.0
                 if item is None:
                     buckets[bucket_epoch] = {
                         "timestamp": datetime.fromtimestamp(bucket_epoch, tz=timezone.utc).isoformat(),
-                        "open": o,
-                        "high": h,
-                        "low": l,
-                        "close": c,
-                        "volume": v,
+                        "open": open_p,
+                        "high": high_p,
+                        "low": low_p,
+                        "close": close_p,
+                        "volume": volume,
                         "trades": 1,
                     }
                 else:
                     # For aggregation, update OHLC properly
-                    item["high"] = max(item["high"], h)
-                    item["low"] = min(item["low"], l) if item["low"] > 0 else l
-                    item["close"] = c
-                    item["volume"] = item["volume"] + v
+                    item["high"] = max(item["high"], high_p)
+                    item["low"] = min(item["low"], low_p) if item["low"] > 0 else low_p
+                    item["close"] = close_p
+                    item["volume"] = item["volume"] + volume
                     item["trades"] = item["trades"] + 1
 
             for bucket_epoch in sorted(buckets.keys()):
@@ -849,8 +850,10 @@ def create_app() -> FastAPI:
             # For now, if query looks like a symbol, we assume main event. or just skip if no ID known.
             # We'll try to use the query as ID if it contains hyphen, else default to btc-bitcoin for demo if query is 'bitcoin'
             c_id = query.lower()
-            if "bitcoin" in c_id and "-" not in c_id: c_id = "btc-bitcoin"
-            if "ethereum" in c_id and "-" not in c_id: c_id = "eth-ethereum"
+            if "bitcoin" in c_id and "-" not in c_id:
+                c_id = "btc-bitcoin"
+            if "ethereum" in c_id and "-" not in c_id:
+                c_id = "eth-ethereum"
             
             if "-" in c_id:
                 res = await asyncio.to_thread(paprika.get_news, c_id)
@@ -878,7 +881,8 @@ def create_app() -> FastAPI:
         # Sort by date (descending)
         # Handle cases where date might be None or unparseable string
         def parse_date(d):
-            if not d: return ""
+            if not d:
+                return ""
             return str(d)
         
         aggregated.sort(key=lambda x: parse_date(x["published_at"]), reverse=True)
@@ -910,7 +914,7 @@ def create_app() -> FastAPI:
         Combines RSI, MACD, Bollinger Bands, SMA crossovers, and volume analysis
         to produce a buy/sell/hold recommendation with confidence score.
         """
-        from app.signals.engine import SignalEngine
+
         
         symbol = symbol.strip().upper().replace("/", "-")
         engine = SignalEngine(db)
@@ -932,7 +936,7 @@ def create_app() -> FastAPI:
         """
         Generate trading signals for multiple symbols.
         """
-        from app.signals.engine import SignalEngine
+
         
         symbol_list = [s.strip().upper().replace("/", "-") for s in symbols.split(",") if s.strip()]
         if not symbol_list:

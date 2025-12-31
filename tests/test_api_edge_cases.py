@@ -1,6 +1,5 @@
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
-import pytest
 from app.main import create_app, get_db, get_news_connector, get_coingecko_connector, get_coinmarketcap_connector
 
 # Mocks
