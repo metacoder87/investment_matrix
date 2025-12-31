@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 import json
 from datetime import datetime, timedelta, timezone
+import asyncio
 
 import pandas as pd
 from celery.result import AsyncResult
@@ -15,6 +16,11 @@ from app.analysis_quant import calculate_risk_metrics
 from app.config import settings
 from app.connectors.fundamental import CoinGeckoConnector
 from app.connectors.sentiment import Sentiment
+from app.connectors.news_api import NewsConnector
+from app.connectors.coinmarketcap import CoinMarketCapConnector
+from app.connectors.coinpaprika import CoinPaprikaConnector
+from app.connectors.financialmodelingprep import FinancialModelingPrepConnector
+from app.connectors.newsdata_io import NewsDataIoConnector
 from app.redis_client import redis_client
 from app.models.market import MarketTrade
 from app.models.instrument import Price
@@ -26,23 +32,18 @@ def get_coingecko_connector() -> CoinGeckoConnector:
     return CoinGeckoConnector()
 
 def get_news_connector() -> NewsConnector:
-    from app.connectors.news_api import NewsConnector
     return NewsConnector()
 
 def get_coinmarketcap_connector() -> CoinMarketCapConnector:
-    from app.connectors.coinmarketcap import CoinMarketCapConnector
     return CoinMarketCapConnector()
 
-def get_coinpaprika_connector():
-    from app.connectors.coinpaprika import CoinPaprikaConnector
+def get_coinpaprika_connector() -> CoinPaprikaConnector:
     return CoinPaprikaConnector()
 
-def get_fmp_connector():
-    from app.connectors.financialmodelingprep import FinancialModelingPrepConnector
+def get_fmp_connector() -> FinancialModelingPrepConnector:
     return FinancialModelingPrepConnector()
 
-def get_newsdata_connector():
-    from app.connectors.newsdata_io import NewsDataIoConnector
+def get_newsdata_connector() -> NewsDataIoConnector:
     return NewsDataIoConnector()
 
 
@@ -757,20 +758,20 @@ def create_app() -> FastAPI:
 
         if source == "coinmarketcap":
             # CMC usually expects symbol
-            data = cmc.get_fundamentals(query)
+            data = await asyncio.to_thread(cmc.get_fundamentals, query)
             if data and data.get("status") in ("disabled", "error"):
                  # Fallback to coingecko if cmc fails/disabled
                  data = None
         
         if not data:
             # Try CoinGecko (as ID first)
-            data = cg.get_coin_fundamentals(query)
+            data = await asyncio.to_thread(cg.get_coin_fundamentals, query)
             
             if not data:
                 # Try resolving from symbol
-                resolved_id = cg.get_coin_id_by_symbol(query)
+                resolved_id = await asyncio.to_thread(cg.get_coin_id_by_symbol, query)
                 if resolved_id:
-                    data = cg.get_coin_fundamentals(resolved_id)
+                    data = await asyncio.to_thread(cg.get_coin_fundamentals, resolved_id)
         
         if not data:
              raise HTTPException(status_code=404, detail=f"Fundamentals not found for '{query}'")
