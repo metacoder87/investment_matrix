@@ -76,8 +76,21 @@ class SignalEngine:
     5. Volume confirmation
     """
 
-    def __init__(self, db: Session):
+    def __init__(
+        self, 
+        db: Session,
+        sentiment_connector: Optional[Sentiment] = None,
+        cmc_connector: Optional[CoinMarketCapConnector] = None,
+        cg_connector: Optional[CoinGeckoConnector] = None,
+        cp_connector: Optional[CoinPaprikaConnector] = None,
+        fmp_connector: Optional[FinancialModelingPrepConnector] = None
+    ):
         self.db = db
+        self.sentiment_connector = sentiment_connector or Sentiment()
+        self.cmc_connector = cmc_connector or CoinMarketCapConnector()
+        self.cg_connector = cg_connector or CoinGeckoConnector()
+        self.cp_connector = cp_connector or CoinPaprikaConnector()
+        self.fmp_connector = fmp_connector or FinancialModelingPrepConnector()
 
     def generate_signal(self, symbol: str, lookback: int = 500) -> Optional[Signal]:
         """
@@ -240,10 +253,9 @@ class SignalEngine:
         
         # Sentiment Analysis
         try:
-            sent_engine = Sentiment()
             # Use base symbol for sentiment lookups (e.g. BTC from BTC-USD)
             base_sym = symbol.split("-")[0] if "-" in symbol else symbol
-            sent_data = sent_engine.get_sentiment(base_sym)
+            sent_data = self.sentiment_connector.get_sentiment(base_sym)
             
             # Fear & Greed (Global Market Sentiment)
             fng = sent_data.get("fear_and_greed")
