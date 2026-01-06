@@ -7,7 +7,7 @@ import asyncio
 
 import pandas as pd
 from celery.result import AsyncResult
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
@@ -48,10 +48,13 @@ def get_newsdata_connector() -> NewsDataIoConnector:
     return NewsDataIoConnector()
 
 
+from app.services.backfill import StartupGapFiller
+
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         init_db()
+        await StartupGapFiller.run_startup_check()
         yield
 
     app = FastAPI(
@@ -74,6 +77,10 @@ def create_app() -> FastAPI:
     )
 
     api = APIRouter(prefix=settings.API_PREFIX)
+    
+    from app.routers import portfolio, system
+    api.include_router(portfolio.router)
+    api.include_router(system.router)
 
     @api.get("/health", tags=["Meta"])
     async def health():
@@ -167,9 +174,70 @@ def create_app() -> FastAPI:
 
 
     # --- Data Endpoints ---
+
     @api.get("/coins", tags=["Data"])
-    async def get_coins_list(cg: CoinGeckoConnector = Depends(get_coingecko_connector)):
-        return cg.get_all_coins(per_page=100, page=1)
+    async def get_coins_list(
+        background_tasks: BackgroundTasks,
+        cg: CoinGeckoConnector = Depends(get_coingecko_connector)
+    ):
+        """
+        Returns top coins. Uses stale-while-revalidate caching:
+        - If cache exists, return it immediately.
+        - If cache is older than 10 mins, trigger background refresh.
+        - If cache missing, fetch synchronously (blocking).
+        """
+        cache_key = "coins_list_v2"
+        REFRESH_INTERVAL = 600  # 10 minutes
+        
+        async def _refresh_cache():
+            try:
+                # Reduced fetch size to 50 for speed, user focused on top/uncommon search
+                new_coins = await asyncio.to_thread(cg.get_all_coins, per_page=50, page=1)
+                if new_coins:
+                    cache_value = {
+                        "timestamp": datetime.now(timezone.utc).timestamp(),
+                        "data": new_coins
+                    }
+                    # Set long physical TTL (24h) so we always have *something*
+                    await redis_client.setex(cache_key, 86400, json.dumps(cache_value))
+            except Exception as e:
+                print(f"Background coin refresh failed: {e}")
+
+        # 1. Try Cache
+        raw = await redis_client.get(cache_key)
+        
+        if raw:
+            try:
+                cached = json.loads(raw)
+                # cached might be list (old format) or dict (new format)
+                if isinstance(cached, list):
+                    # Legacy format migration
+                    data = cached
+                    age = 999999
+                else:
+                    data = cached.get("data", [])
+                    ts = cached.get("timestamp", 0)
+                    age = datetime.now(timezone.utc).timestamp() - ts
+                
+                # 2. Check Freshness
+                if age > REFRESH_INTERVAL:
+                    background_tasks.add_task(_refresh_cache)
+                
+                return data
+            except Exception:
+                # If parse fails, fall through
+                pass
+        
+        # 3. Cache Miss (Blocking)
+        # This only happens on first boot or if cache expires (24h)
+        coins = await asyncio.to_thread(cg.get_all_coins, per_page=50, page=1)
+        if coins:
+            cache_value = {
+                "timestamp": datetime.now(timezone.utc).timestamp(),
+                "data": coins
+            }
+            await redis_client.setex(cache_key, 86400, json.dumps(cache_value))
+        return coins or []
 
     @api.get("/market/latest/{symbol:path}", tags=["Data"])
     async def get_latest_tick(symbol: str):
@@ -698,6 +766,27 @@ def create_app() -> FastAPI:
 
     @api.get("/coin/{symbol:path}/analysis", tags=["Analysis"])
     async def get_coin_analysis(symbol: str, db: Session = Depends(get_db)):
+        # 1. Get Latest Timestamp (Lightweight Query)
+        latest_ts = db.query(func.max(Price.timestamp)).filter(Price.symbol == symbol).scalar()
+        
+        if not latest_ts:
+            # Trigger On-Demand Backfill
+            from celery_worker.tasks import backfill_historical_candles
+            backfill_historical_candles.delay(symbol=symbol)
+            return []
+
+        # 2. Check Cache (Keyed by Symbol + Timestamp)
+        # This ensures we always serve fresh results without re-calculating if data hasn't changed
+        cache_key = f"analysis:{symbol}:{int(latest_ts.timestamp())}"
+        cached_result = await redis_client.get(cache_key)
+        
+        if cached_result:
+             try:
+                 return json.loads(cached_result)
+             except:
+                 pass
+
+        # 3. Compute (Cache Miss)
         price_data = (
             db.query(Price)
             .filter(Price.symbol == symbol)
@@ -705,43 +794,98 @@ def create_app() -> FastAPI:
             .limit(500)
             .all()
         )
-        if not price_data:
-            raise HTTPException(
-                status_code=404,
-                detail="No price data found for this symbol. Please ingest data first.",
-            )
 
         df = pd.DataFrame(
-            [(p.timestamp, p.high, p.low, p.open, p.close, p.volume) for p in price_data],
+            [(p.timestamp, float(p.high), float(p.low), float(p.open), float(p.close), float(p.volume) if p.volume else 0.0) for p in price_data],
             columns=["timestamp", "high", "low", "open", "close", "volume"],
         ).sort_values(by="timestamp")
+        
         for col in ("close", "high", "low", "volume"):
             df[col] = pd.to_numeric(df[col])
 
-        analysis_df = add_technical_indicators(df)
-        return analysis_df.to_dict(orient="records")
+        # Run CPU-intensive analysis in threadpool to avoid blocking event loop
+        analysis_df = await asyncio.to_thread(add_technical_indicators, df)
+        
+        # Ensure timestamps are serialized to strings
+        if "timestamp" in analysis_df.columns:
+            analysis_df["timestamp"] = analysis_df["timestamp"].astype(str)
+        
+        result = analysis_df.to_dict(orient="records")
+        
+        # Add metadata for "Signal Age" feature
+        response = {
+            "calculated_at": datetime.now(timezone.utc).isoformat(),
+            "data": result
+        }
+        
+        # Cache for 24h (or until timestamp changes, effectively forever for this specific candle set)
+        await redis_client.setex(cache_key, 86400, json.dumps(response))
+        
+        return response
 
     @api.get("/coin/{symbol:path}/quant", tags=["Analysis"])
     async def get_coin_quant_metrics(symbol: str, db: Session = Depends(get_db)):
         """
         Returns institutional-grade quantitative risk metrics (Sharpe, Sortino, Volatility, etc.)
         """
+        # 1. Get Latest Timestamp
+        latest_ts = db.query(func.max(Price.timestamp)).filter(Price.symbol == symbol).scalar()
+        
+        if not latest_ts:
+             # Trigger On-Demand Backfill
+            from celery_worker.tasks import backfill_historical_candles
+            backfill_historical_candles.delay(symbol=symbol)
+            
+            # Return empty metrics
+            return {
+                "annualized_volatility": 0.0,
+                "sharpe_ratio": 0.0,
+                "max_drawdown": 0.0,
+                "sortino_ratio": 0.0,
+                "calculated_at": datetime.now(timezone.utc).isoformat()
+            }
+            
+        # 2. Check Cache
+        cache_key = f"quant:{symbol}:{int(latest_ts.timestamp())}"
+        cached_result = await redis_client.get(cache_key)
+        
+        if cached_result:
+             try:
+                 return json.loads(cached_result)
+             except:
+                 pass
+                 
+        # 3. Compute (Cache Miss)
         price_data = (
             db.query(Price)
             .filter(Price.symbol == symbol)
             .order_by(Price.timestamp.desc())
-            .limit(365) # Analyze last 1 year max
+            .limit(365) # 1 year lookback for quant metrics
             .all()
         )
-        if not price_data:
-            raise HTTPException(status_code=404, detail="No price data found.")
-            
+
         df = pd.DataFrame(
-            [(p.timestamp, float(p.close)) for p in reversed(price_data)],
-            columns=["timestamp", "close"]
-        ).set_index("timestamp")
+            [(p.timestamp, float(p.close)) for p in price_data],
+            columns=["timestamp", "close"],
+        ).sort_values(by="timestamp")
         
-        return calculate_risk_metrics(df)
+        df["close"] = pd.to_numeric(df["close"])
+        
+        # Run calculation in threadpool
+        metrics = await asyncio.to_thread(calculate_risk_metrics, df)
+        
+        # Ensure serialization (if metrics contains Timestamps)
+        # Typically calculate_quant_metrics returns a dict of floats, but if it returns dates, handle them.
+        # However, checking the logs, the error might also come from the response metadata if I added one.
+        
+        response = {
+            "calculated_at": datetime.now(timezone.utc).isoformat(),
+            "data": metrics
+        }
+        # Cache for 24h (versioned by timestamp)
+        await redis_client.setex(cache_key, 86400, json.dumps(response))
+        
+        return response
 
     @api.get("/coin/{query}/fundamentals", tags=["Data"])
     async def get_coin_fundamentals_endpoint(
@@ -910,15 +1054,31 @@ def create_app() -> FastAPI:
     ):
         """
         Generate a trading signal for the given symbol.
-        
-        Combines RSI, MACD, Bollinger Bands, SMA crossovers, and volume analysis
-        to produce a buy/sell/hold recommendation with confidence score.
         """
-
-        
         symbol = symbol.strip().upper().replace("/", "-")
+        
+        # 1. Get Latest Timestamp
+        latest_ts = db.query(func.max(Price.timestamp)).filter(Price.symbol == symbol).scalar()
+        
+        if not latest_ts:
+             raise HTTPException(
+                status_code=404,
+                detail=f"Insufficient data for {symbol}. Please trigger a backfill first.",
+            )
+
+        # 2. Check Cache
+        cache_key = f"signal:{symbol}:{lookback}:{int(latest_ts.timestamp())}"
+        cached = await redis_client.get(cache_key)
+        if cached:
+            try:
+                return json.loads(cached)
+            except:
+                pass
+
+        # 3. Compute (Cache Miss)
         engine = SignalEngine(db)
-        signal = engine.generate_signal(symbol, lookback=lookback)
+        # Run in threadpool
+        signal = await asyncio.to_thread(engine.generate_signal, symbol, lookback=lookback)
         
         if signal is None:
             raise HTTPException(
@@ -926,7 +1086,12 @@ def create_app() -> FastAPI:
                 detail=f"Insufficient data for {symbol}. Please trigger a backfill first.",
             )
         
-        return signal.to_dict()
+        response = signal.to_dict()
+        
+        # Cache results (versioned by timestamp)
+        await redis_client.setex(cache_key, 86400, json.dumps(response))
+        
+        return response
 
     @api.get("/signals/batch", tags=["Analysis"])
     async def get_batch_signals(
@@ -935,20 +1100,35 @@ def create_app() -> FastAPI:
     ):
         """
         Generate trading signals for multiple symbols.
+        Cached for 60 seconds to prevent dashboard overload.
         """
+        # Check Cache
+        cache_key = f"signals:batch:{symbols.replace(' ', '')}"
+        cached = await redis_client.get(cache_key)
+        if cached:
+            try:
+                return json.loads(cached)
+            except:
+                pass
 
-        
         symbol_list = [s.strip().upper().replace("/", "-") for s in symbols.split(",") if s.strip()]
         if not symbol_list:
             raise HTTPException(status_code=400, detail="No symbols provided")
         
         engine = SignalEngine(db)
-        signals = engine.generate_signals_batch(symbol_list)
+        # Run in threadpool
+        signals = await asyncio.to_thread(engine.generate_signals_batch, symbol_list)
         
-        return {
+        response = {
             "count": len(signals),
             "signals": [s.to_dict() for s in signals],
+            "calculated_at": datetime.now(timezone.utc).isoformat()
         }
+        
+        # Cache for 60s
+        await redis_client.setex(cache_key, 60, json.dumps(response))
+        
+        return response
 
     app.include_router(api)
 
