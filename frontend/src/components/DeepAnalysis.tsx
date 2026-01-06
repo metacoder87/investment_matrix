@@ -8,6 +8,7 @@ interface QuantMetrics {
     sharpe_ratio: number;
     max_drawdown: number;
     sortino_ratio: number;
+    calculated_at?: string;
 }
 
 interface Fundamentals {
@@ -30,6 +31,15 @@ interface DeepAnalysisProps {
     symbol: string;
 }
 
+function timeAgo(dateString?: string) {
+    if (!dateString) return "";
+    const seconds = Math.floor((new Date().getTime() - new Date(dateString).getTime()) / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    return `${Math.floor(minutes / 60)}h ago`;
+}
+
 export default function DeepAnalysis({ symbol }: DeepAnalysisProps) {
     const [quant, setQuant] = useState<QuantMetrics | null>(null);
     const [fund, setFund] = useState<Fundamentals | null>(null);
@@ -44,7 +54,10 @@ export default function DeepAnalysis({ symbol }: DeepAnalysisProps) {
             try {
                 // Fetch Quant
                 const quantRes = await fetch(`http://localhost:8000/api/coin/${symbol}/quant`);
-                if (quantRes.ok) setQuant(await quantRes.json());
+                if (quantRes.ok) {
+                    const json = await quantRes.json();
+                    setQuant(json.data ? { ...json.data, calculated_at: json.calculated_at } : json);
+                }
 
                 // Fetch Fundamentals (using base symbol)
                 const fundRes = await fetch(`http://localhost:8000/api/coin/${baseSymbol}/fundamentals`);
@@ -68,10 +81,17 @@ export default function DeepAnalysis({ symbol }: DeepAnalysisProps) {
 
     return (
         <div className="space-y-6">
-            <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-                <Brain className="h-6 w-6 text-pink-500" />
-                Deep Market Analysis
-            </h2>
+            <div className="flex items-center justify-between">
+                <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+                    <Brain className="h-6 w-6 text-pink-500" />
+                    Deep Market Analysis
+                </h2>
+                {quant?.calculated_at && (
+                    <span className="text-xs text-gray-400 bg-white/5 px-2 py-1 rounded-full">
+                        Updated {timeAgo(quant.calculated_at)}
+                    </span>
+                )}
+            </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 {/* 1. Quantitative Risk Card */}
@@ -142,8 +162,8 @@ export default function DeepAnalysis({ symbol }: DeepAnalysisProps) {
                             <>
                                 <div className="text-5xl font-bold text-white mb-2">{sentiment.fear_and_greed.value}</div>
                                 <div className={`px-3 py-1 rounded-full text-sm font-bold ${sentiment.fear_and_greed.value < 25 ? "bg-red-500/20 text-red-500" :
-                                        sentiment.fear_and_greed.value > 75 ? "bg-green-500/20 text-green-500" :
-                                            "bg-yellow-500/20 text-yellow-500"
+                                    sentiment.fear_and_greed.value > 75 ? "bg-green-500/20 text-green-500" :
+                                        "bg-yellow-500/20 text-yellow-500"
                                     }`}>
                                     {sentiment.fear_and_greed.value_classification}
                                 </div>

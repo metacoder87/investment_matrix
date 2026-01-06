@@ -108,10 +108,11 @@ export default function CandlestickChart({
             volumeData.sort((a, b) => (a.time as number) - (b.time as number));
 
             // Update chart
-            if (candleSeriesRef.current) {
+            // Update chart - Ensure chart is still Mounted (chartRef.current not null)
+            if (chartRef.current && candleSeriesRef.current) {
                 candleSeriesRef.current.setData(candleData);
             }
-            if (volumeSeriesRef.current) {
+            if (chartRef.current && volumeSeriesRef.current) {
                 volumeSeriesRef.current.setData(volumeData);
             }
 
@@ -134,7 +135,9 @@ export default function CandlestickChart({
 
             if (!response.ok) return;
 
-            const analysisData = await response.json();
+            const json = await response.json();
+            const analysisData = Array.isArray(json) ? json : (Array.isArray(json.data) ? json.data : []);
+
             if (!analysisData || analysisData.length === 0) return;
 
             // Extract Bollinger Bands
@@ -151,13 +154,13 @@ export default function CandlestickChart({
                 }
             });
 
-            if (bbUpperRef.current && bbUpperData.length > 0) {
+            if (chartRef.current && bbUpperRef.current && bbUpperData.length > 0) {
                 bbUpperRef.current.setData(bbUpperData);
             }
-            if (bbMiddleRef.current && bbMiddleData.length > 0) {
+            if (chartRef.current && bbMiddleRef.current && bbMiddleData.length > 0) {
                 bbMiddleRef.current.setData(bbMiddleData);
             }
-            if (bbLowerRef.current && bbLowerData.length > 0) {
+            if (chartRef.current && bbLowerRef.current && bbLowerData.length > 0) {
                 bbLowerRef.current.setData(bbLowerData);
             }
         } catch (err) {
@@ -255,6 +258,12 @@ export default function CandlestickChart({
         return () => {
             window.removeEventListener("resize", handleResize);
             chart.remove();
+            chartRef.current = null;
+            candleSeriesRef.current = null;
+            volumeSeriesRef.current = null;
+            bbUpperRef.current = null;
+            bbMiddleRef.current = null;
+            bbLowerRef.current = null;
         };
     }, [activeTimeframe]);
 
@@ -316,7 +325,13 @@ export default function CandlestickChart({
                     candleSeriesRef.current.update(currentCandle);
                 }
                 setLastUpdate(new Date());
+            } else if (data.type === "error") {
+                console.debug("Coinbase WS Error (Chart):", data.message);
             }
+        };
+
+        ws.onerror = (e) => {
+            console.debug("WS Connection Error (Chart)", e);
         };
 
         return () => ws.close();

@@ -126,7 +126,10 @@ export default function IndicatorPanel({ symbol }: IndicatorPanelProps) {
                     return;
                 }
 
-                const data: AnalysisData[] = await response.json();
+                const json = await response.json();
+                const data: AnalysisData[] = Array.isArray(json) ? json : (Array.isArray(json.data) ? json.data : []);
+                // const calculatedAt = !Array.isArray(json) ? json.calculated_at : null;
+
                 if (!data || data.length === 0) {
                     setLoading(false);
                     return;
