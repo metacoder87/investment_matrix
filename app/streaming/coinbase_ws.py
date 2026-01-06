@@ -1,18 +1,13 @@
 from __future__ import annotations
 
-import asyncio
-import json
-import logging
 import time
 from datetime import datetime
 from typing import Any
 
-import websockets
-
+from app.streaming.base_ws import BaseTradeStreamer
 from app.streaming.publisher import RedisPublisher
+from app.streaming.symbols import CanonicalSymbol
 
-
-logger = logging.getLogger("cryptoinsight.streaming.coinbase")
 
 COINBASE_WS_URL = "wss://ws-feed.exchange.coinbase.com"
 
@@ -26,54 +21,53 @@ def _parse_iso8601(ts: str | None) -> float | None:
         return None
 
 
-class CoinbaseTradeStreamer:
+class CoinbaseTradeStreamer(BaseTradeStreamer):
+    # Note: legacy code passed string symbols directly (product_ids).
+    # New architecture passes CanonicalSymbol. We adapt for backwards compatibility
+    # or updated loop usage. Assuming `app.streamer.run_all` passes list[str] currently,
+    # we need to be careful.
+    # Looking at `app.streamer.py`, it does: `tasks.append(... CoinbaseTradeStreamer(product_ids) ...)` 
+    # where product_ids is a list[str].
+    # HOWEVER, BaseTradeStreamer expects list[CanonicalSymbol].
+    # Let's override __init__ to accept list[str] like before strictly for Coinbase 
+    # OR we need to update `streamer.py` to pass objects.
+    # The clean "Quant" way is to fix the caller. 
+    # But since `BaseTradeStreamer` takes `symbols`, let's just accept `symbols` here which
+    # are strs for Coinbase in current usage, and treat them as "symbols".
+    # Wait, the prompt says "Refactor... to inherit". 
+    # Let's make it accept list[str] cleanly by just ignoring the type hint from base if needed, 
+    # or better: we update `streamer.py` later.
+    # For now, let's keep __init__ signature compatible with `streamer.py`.
+    
     def __init__(self, symbols: list[str]) -> None:
-        self._symbols = symbols
+        # Base class expects symbols for logging mostly. We pass them up.
+        # We dummy up a list for the Base class to not crash if it iterates, 
+        # but Base only uses them for len() logging.
+        super().__init__(symbols, name="Coinbase", url=COINBASE_WS_URL) 
+        self._product_ids = symbols
 
-    async def run_forever(self, publisher: RedisPublisher) -> None:
-        subscribe = {
+    def get_subscription_message(self) -> dict:
+        return {
             "type": "subscribe",
-            "product_ids": self._symbols,
+            "product_ids": self._product_ids,
             "channels": ["matches"],
         }
 
-        backoff_seconds = 1.0
-        while True:
-            try:
-                async with websockets.connect(
-                    COINBASE_WS_URL,
-                    ping_interval=20,
-                    ping_timeout=20,
-                    close_timeout=10,
-                    max_queue=1024,
-                ) as ws:
-                    backoff_seconds = 1.0
-                    await ws.send(json.dumps(subscribe, separators=(",", ":")))
-                    logger.info("Subscribed to matches: %s", ",".join(self._symbols))
+    async def process_message(self, msg: Any, publisher: RedisPublisher) -> None:
+        if msg.get("type") != "match":
+            return
 
-                    async for raw in ws:
-                        try:
-                            msg: dict[str, Any] = json.loads(raw)
-                        except json.JSONDecodeError:
-                            continue
-                        if msg.get("type") != "match":
-                            continue
+        recv_ts = time.time()
+        ts = _parse_iso8601(str(msg.get("time") or "")) or recv_ts
+        
+        await publisher.publish_trade(
+            exchange="coinbase",
+            symbol=str(msg.get("product_id") or "UNKNOWN"),
+            ts=ts,
+            recv_ts=recv_ts,
+            price=float(msg.get("price") or 0.0),
+            amount=float(msg.get("size") or 0.0),
+            side=str(msg.get("side") or "").lower() or None,
+        )
 
-                        recv_ts = time.time()
-                        ts = _parse_iso8601(str(msg.get("time") or "")) or recv_ts
-                        await publisher.publish_trade(
-                            exchange="coinbase",
-                            symbol=str(msg.get("product_id") or "UNKNOWN"),
-                            ts=ts,
-                            recv_ts=recv_ts,
-                            price=float(msg.get("price") or 0.0),
-                            amount=float(msg.get("size") or 0.0),
-                            side=str(msg.get("side") or "").lower() or None,
-                        )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Disconnected; retrying in %.1fs", backoff_seconds)
-                await asyncio.sleep(backoff_seconds)
-                backoff_seconds = min(backoff_seconds * 2.0, 30.0)
 

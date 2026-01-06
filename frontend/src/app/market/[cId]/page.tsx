@@ -7,6 +7,7 @@ import CandlestickChart from "@/components/CandlestickChart";
 import IndicatorPanel from "@/components/IndicatorPanel";
 import SignalCard from "@/components/SignalCard";
 import DeepAnalysis from "@/components/DeepAnalysis";
+import { formatPrice } from "@/utils/format";
 
 interface MarketPageProps {
     params: {
@@ -64,7 +65,15 @@ export default function MarketPage({ params }: MarketPageProps) {
                     volume_24h: parseFloat(data.volume_24h),
                 });
                 setLastUpdated(new Date());
+            } else if (data.type === "error") {
+                // Suppress alert for unsupported coins
+                console.debug("Coinbase WS Error:", data.message);
             }
+        };
+
+        ws.onerror = (e) => {
+            // connection errors
+            console.debug("WS Connection Error (likely unsupported symbol)", e);
         };
 
         return () => ws.close();
@@ -108,7 +117,7 @@ export default function MarketPage({ params }: MarketPageProps) {
                             <span className="text-sm text-gray-500">Current Price</span>
                             <div className="flex items-center gap-3">
                                 <span className={`text-4xl font-mono font-medium ${ticker?.side === 'buy' ? 'text-cyan-400' : 'text-pink-500'}`}>
-                                    ${ticker?.price?.toLocaleString(undefined, { minimumFractionDigits: 2 }) || "---"}
+                                    {formatPrice(ticker?.price)}
                                 </span>
                                 {ticker && (
                                     <span className="flex items-center gap-1 rounded bg-white/5 px-2 py-0.5 text-sm">

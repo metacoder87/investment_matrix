@@ -10,7 +10,7 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d cryptoinsight"]
+      test: [ "CMD-SHELL", "pg_isready -U user -d cryptoinsight" ]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -31,6 +31,9 @@ services:
     build: .
     env_file:
       - .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -40,12 +43,17 @@ services:
         condition: service_started
     ports:
       - "8000:8000"
+    volumes:
+      - .:/code
     command: >
       sh -c "uvicorn app.main:app --host 0.0.0.0 --port 8000"
   worker:
     build: .
     env_file:
       - .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -59,6 +67,9 @@ services:
     build: .
     env_file:
       - .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
       db:
         condition: service_healthy
@@ -70,6 +81,9 @@ services:
     build: .
     env_file:
       - .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
       migrate:
         condition: service_completed_successfully

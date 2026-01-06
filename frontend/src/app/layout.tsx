@@ -10,6 +10,9 @@ const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 export const metadata: Metadata = {
     title: "CryptoInsight | Investment Matrix",
     description: "Advanced crypto market analysis terminal",
+    icons: {
+        icon: "/logo.png",
+    },
 };
 
 export default function RootLayout({

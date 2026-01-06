@@ -109,4 +109,9 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
             # e.g. ATRe_14 vs ATRr_14
             pass
 
+    # Replace NaN/Infinity with None (so JSON encoders can handle it as null)
+    # Using 0 is safer for "missing" indicator values in this context
+    df = df.replace([float("inf"), float("-inf")], 0)
+    df = df.fillna(0)
+
     return df

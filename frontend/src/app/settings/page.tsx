@@ -45,9 +45,24 @@ export default function SettingsPage() {
 
                 <section className="rounded-xl border border-white/10 bg-surface/50 p-6 backdrop-blur-sm">
                     <h2 className="text-xl font-semibold mb-4 border-b border-white/10 pb-2">Data</h2>
-                    <button className="px-4 py-2 border border-red-500/50 text-red-400 rounded hover:bg-red-500/10 transition-colors">
-                        Clear Local Cache
-                    </button>
+                    <div className="flex items-center gap-4">
+                        <button
+                            onClick={async () => {
+                                if (!confirm("Are you sure? This will clear all cached market data.")) return;
+                                try {
+                                    const res = await fetch(`${apiUrl}/system/cache/clear`, { method: "POST" });
+                                    if (res.ok) alert("Cache cleared successfully!");
+                                    else alert("Failed to clear cache.");
+                                } catch (e) {
+                                    console.error(e);
+                                    alert("Error clearing cache.");
+                                }
+                            }}
+                            className="px-4 py-2 border border-red-500/50 text-red-400 rounded hover:bg-red-500/10 transition-colors"
+                        >
+                            Clear Local Cache
+                        </button>
+                    </div>
                 </section>
             </div>
         </main>

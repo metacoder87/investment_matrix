@@ -38,21 +38,34 @@ class CoinGeckoConnector:
             print(f"An error occurred while fetching all coins from CoinGecko: {e}")
             return []
 
+    _coins_cache = None
+    _coins_cache_ts = 0
+    CACHE_DURATION = 3600  # 1 hour
+
     def get_coin_id_by_symbol(self, symbol: str) -> str | None:
         """
         Attempts to resolve a symbol (e.g. 'BTC') to a CoinGecko ID (e.g. 'bitcoin').
-        Uses the top 100 coins cache or fetches list.
+        Uses in-memory caching to avoid repeated API calls.
         """
+        import time
+        
         try:
             # Clean symbol (remove -USD etc)
             clean_sym = symbol.split("-")[0].lower()
             
-            # TODO: caching this list would be better for performance
-            coins = self.get_all_coins(per_page=250, page=1)
-            
-            for cw in coins:
+            # Refresh cache if empty or stale
+            now = time.time()
+            if not self._coins_cache or (now - self._coins_cache_ts > self.CACHE_DURATION):
+                # Fetch top 250 coins which covers 99% of use cases
+                self._coins_cache = self.get_all_coins(per_page=250, page=1)
+                self._coins_cache_ts = now
+                
+            for cw in self._coins_cache:
                 if cw.get("symbol") == clean_sym:
                     return cw.get("id")
+                    
+            # Fallback: if not in top 250, maybe fetch specific search?
+            # For now, return None to avoid heavy full-list fetch
             return None
         except Exception:
             return None

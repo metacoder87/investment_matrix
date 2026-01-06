@@ -80,12 +80,14 @@ export default function MarketChart({ data, color = "#22d3ee" }: MarketChartProp
         return () => {
             window.removeEventListener("resize", handleResize);
             chart.remove();
+            chartRef.current = null;
+            seriesRef.current = null;
         };
     }, []); // Init chart once
 
     // Update data separately
     useEffect(() => {
-        if (!seriesRef.current || data.length === 0) return;
+        if (!seriesRef.current || !chartRef.current || data.length === 0) return;
 
         // Map data to Lightweight Charts format
         const formattedData = data.map((d) => ({
@@ -103,15 +105,20 @@ export default function MarketChart({ data, color = "#22d3ee" }: MarketChartProp
             ))
         );
 
-        seriesRef.current.setData(uniqueData);
-        chartRef.current?.timeScale().fitContent();
+        try {
+            seriesRef.current.setData(uniqueData);
+            chartRef.current?.timeScale().fitContent();
 
-        // Update styling if trend changes
-        seriesRef.current.applyOptions({
-            lineColor: chartColor,
-            topColor: isPositive ? "rgba(34, 211, 238, 0.4)" : "rgba(244, 114, 182, 0.4)",
-            bottomColor: isPositive ? "rgba(34, 211, 238, 0.0)" : "rgba(244, 114, 182, 0.0)",
-        });
+            // Update styling if trend changes
+            seriesRef.current.applyOptions({
+                lineColor: chartColor,
+                topColor: isPositive ? "rgba(34, 211, 238, 0.4)" : "rgba(244, 114, 182, 0.4)",
+                bottomColor: isPositive ? "rgba(34, 211, 238, 0.0)" : "rgba(244, 114, 182, 0.0)",
+            });
+        } catch (e) {
+            // Chart likely disposed
+            console.warn("Chart update failed (likely disposed)", e);
+        }
 
     }, [data, chartColor, isPositive]);
 

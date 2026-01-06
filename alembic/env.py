@@ -11,6 +11,7 @@ from database import Base
 # Ensure models are registered with SQLAlchemy metadata.
 import app.models.instrument  # noqa: F401
 import app.models.market  # noqa: F401
+import app.models.portfolio  # noqa: F401
 
 
 config = context.config
