@@ -11,7 +11,9 @@ COPY ./requirements.txt /code/requirements.txt
 RUN python -m pip install --upgrade pip setuptools wheel && \
     python -m pip install --prefer-binary --no-cache-dir -r /code/requirements.txt
 
+
 # Copy the application code
+ENV FORCE_REBUILD=1
 COPY . /code/
 
 # Command to run the uvicorn server
