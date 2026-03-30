@@ -12,6 +12,8 @@ from database import Base
 import app.models.instrument  # noqa: F401
 import app.models.market  # noqa: F401
 import app.models.portfolio  # noqa: F401
+import app.models.ticks  # noqa: F401
+import app.models.imports  # noqa: F401
 
 
 config = context.config

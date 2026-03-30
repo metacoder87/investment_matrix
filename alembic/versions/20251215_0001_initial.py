@@ -28,7 +28,7 @@ def upgrade() -> None:
     op.create_table(
         "coins",
         sa.Column("id", sa.String(), primary_key=True),
-        sa.Column("symbol", sa.String(length=20), nullable=False),
+        sa.Column("symbol", sa.String(length=50), nullable=False),
         sa.Column("name", sa.String(), nullable=False),
         sa.Column("market_cap_rank", sa.Integer(), nullable=True),
         sa.Column("image", sa.String(), nullable=True),
@@ -38,7 +38,7 @@ def upgrade() -> None:
     op.create_table(
         "prices",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column("symbol", sa.String(length=20), nullable=False),
+        sa.Column("symbol", sa.String(length=50), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False, primary_key=True),
         sa.Column("open", sa.Numeric(), nullable=True),
         sa.Column("high", sa.Numeric(), nullable=True),
@@ -52,7 +52,7 @@ def upgrade() -> None:
     op.create_table(
         "indicators",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column("symbol", sa.String(length=20), nullable=False),
+        sa.Column("symbol", sa.String(length=50), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False, primary_key=True),
         sa.Column("rsi", sa.Numeric(), nullable=True),
         sa.Column("macd", sa.Numeric(), nullable=True),
@@ -64,7 +64,7 @@ def upgrade() -> None:
         "trades",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
         sa.Column("user_id", sa.UUID(), nullable=False),
-        sa.Column("symbol", sa.String(length=20), nullable=False),
+        sa.Column("symbol", sa.String(length=50), nullable=False),
         sa.Column("action", sa.String(length=4), nullable=False),
         sa.Column("qty", sa.Numeric(), nullable=False),
         sa.Column("price", sa.Numeric(), nullable=False),
