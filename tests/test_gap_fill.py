@@ -1,5 +1,4 @@
 import pytest
-import asyncio
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timedelta, timezone
 from app.services.backfill import StartupGapFiller

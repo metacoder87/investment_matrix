@@ -1,13 +1,11 @@
 import pytest
-import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 from app.streaming.binance_ws import BinanceTradeStreamer, get_binance_ws_url
 from app.streaming.kraken_ws import KrakenTradeStreamer
 from app.streaming.coinbase_ws import CoinbaseTradeStreamer
 from app.streaming.symbols import CanonicalSymbol
 from app.streaming.publisher import RedisPublisher
-from app.config import settings
 
 # Force asyncio mode for this module
 pytest_plugins = ('pytest_asyncio',)
@@ -120,12 +118,10 @@ async def test_coinbase_parsing(publisher):
     assert call_kwargs["side"] == "buy"
 
 @pytest.mark.asyncio
-async def test_base_reconnection_logic(symbols):
+async def test_base_reconnection_logic():
     # Testing the loop is tricky without mocking websockets.connect entirely.
     # We verify that 'process_message' is called by mocking the context manager.
-    
-    streamer = BinanceTradeStreamer(symbols)
-    
+
     # Setup mock websocket
     mock_ws = AsyncMock()
     # __aiter__ yields one message then stops
@@ -134,7 +130,7 @@ async def test_base_reconnection_logic(symbols):
     ]
     
     # Mock connect to return mock_ws
-    with patch("websockets.connect", return_value=mock_ws) as mock_connect:
+    with patch("websockets.connect", return_value=mock_ws):
         # Run process logic only (not the infinite loop, unless we break it)
         # Instead of running run_forever (infinite), we can test process_message isolation
         # which we already did.
