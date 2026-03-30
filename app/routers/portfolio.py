@@ -103,7 +103,7 @@ async def get_portfolio(id: int, db: Session = Depends(get_db)):
                 try:
                     data = json.loads(raw)
                     price_map[sym] = float(data.get("price", 0.0))
-                except:
+                except (TypeError, ValueError, json.JSONDecodeError):
                     price_map[sym] = 0.0
             else:
                 price_map[sym] = 0.0
