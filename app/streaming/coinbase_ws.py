@@ -6,7 +6,6 @@ from typing import Any
 
 from app.streaming.base_ws import BaseTradeStreamer
 from app.streaming.publisher import RedisPublisher
-from app.streaming.symbols import CanonicalSymbol
 
 
 COINBASE_WS_URL = "wss://ws-feed.exchange.coinbase.com"

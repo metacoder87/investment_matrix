@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 from app.config import settings
 from app.redis_client import RedisClient
+from app.streaming.base_ws import BaseTradeStreamer
 from app.streaming.binance_ws import BinanceTradeStreamer
 from app.streaming.coinbase_ws import CoinbaseTradeStreamer
 from app.streaming.kraken_ws import KrakenTradeStreamer
@@ -20,10 +22,6 @@ def _enabled_stream_exchanges() -> list[str]:
     if raw:
         return [e.strip().upper() for e in raw.split(",") if e.strip()]
     return [settings.STREAM_EXCHANGE.strip().upper()]
-
-
-import json
-from app.streaming.base_ws import BaseTradeStreamer
 
 async def _command_listener(redis, streamers: dict[str, BaseTradeStreamer]):
     pubsub = redis.pubsub()

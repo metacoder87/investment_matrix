@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -79,7 +78,7 @@ class BaseTradeStreamer(ABC):
                     # Initial Subscription
                     sub_msg = self.get_subscription_message()
                     await ws.send(json.dumps(sub_msg, separators=(",", ":")))
-                    self.logger.info(f"Subscribed to initial symbols")
+                    self.logger.info("Subscribed to initial symbols")
 
                     # Run Read and Write loops concurrently
                     read_task = asyncio.create_task(self._read_loop(ws, publisher))
