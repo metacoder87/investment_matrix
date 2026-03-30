@@ -1,7 +1,6 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 from sqlalchemy import func
 from app.config import settings
