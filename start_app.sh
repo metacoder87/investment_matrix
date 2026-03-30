@@ -8,7 +8,7 @@ echo -e "\033[0;36m==========================================\033[0m"
 
 # 1. Startup
 echo -e "\n\033[1;33m[1/2] Starting services...\033[0m"
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 if [ $? -ne 0 ]; then
     echo -e "\033[0;31mError during startup. Exiting.\033[0m"
     exit 1

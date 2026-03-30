@@ -6,7 +6,7 @@ Write-Host "==========================================" -ForegroundColor Cyan
 
 # 1. Startup (No Rebuild/Volume Removal)
 Write-Host "`n[1/2] Starting services..." -ForegroundColor Yellow
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Error during startup. Exiting." -ForegroundColor Red
     exit 1
