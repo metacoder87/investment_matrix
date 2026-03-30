@@ -29,7 +29,7 @@ def calculate_risk_metrics(df: pd.DataFrame, risk_free_rate: float = 0.04) -> di
         return metrics
 
     # Ensure close is numeric
-    close = pd.to_numeric(df["close"], errors="coerce").fillna(method="ffill")
+    close = pd.to_numeric(df["close"], errors="coerce").ffill()
     
     # Calculate returns
     returns = close.pct_change().dropna()

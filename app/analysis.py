@@ -77,14 +77,6 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # pandas-ta usually appends length, e.g. "RSI_14".
     # We will map them to the simple names our app uses.
     
-    # Helper to find column matching a pattern
-    def get_col(prefix):
-        # find col starting with prefix
-        candidates = [c for c in df.columns if c.startswith(prefix)]
-        if candidates:
-            return candidates[-1] # closest to end (most recent calc)
-        return None
-
     # Map: Simple Name -> Pandas-Ta Generated Name (dynamic find)
     rename_map = {
         "rsi": "RSI_14",
@@ -104,10 +96,6 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     for simple, pta_name in rename_map.items():
         if pta_name in df.columns:
             df[simple] = df[pta_name]
-        else:
-            # Fallback: exact match failed, try fuzzy
-            # e.g. ATRe_14 vs ATRr_14
-            pass
 
     # Replace NaN/Infinity with None (so JSON encoders can handle it as null)
     # Using 0 is safer for "missing" indicator values in this context
