@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Union, Any
+from typing import Optional
 import base64
 
 from jose import jwt, JWTError
@@ -55,9 +55,11 @@ def decode_access_token(token: str) -> dict:
 
 # --- Encryption Utils ---
 def encrypt_data(data: str) -> str:
-    if not data: return None
+    if not data:
+        return None
     return fernet.encrypt(data.encode()).decode()
 
 def decrypt_data(token: str) -> str:
-    if not token: return None
+    if not token:
+        return None
     return fernet.decrypt(token.encode()).decode()
