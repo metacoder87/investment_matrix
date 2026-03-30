@@ -1,4 +1,4 @@
-import requests
+import httpx
 from app.config import settings
 from datetime import datetime, timedelta
 
@@ -7,7 +7,7 @@ class StockgeistConnector:
         self.api_key = settings.STOCKGEIST_API_KEY
         self.base_url = "https://api.stockgeist.ai/v2"
 
-    def get_crypto_sentiment(self, symbol: str):
+    async def get_crypto_sentiment(self, symbol: str):
         """
         Fetches sentiment for a given cryptocurrency symbol.
         """
@@ -17,10 +17,11 @@ class StockgeistConnector:
             "api_key": self.api_key,
         }
         try:
-            response = requests.get(url, params=params)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
             print(f"An error occurred while fetching sentiment from Stockgeist: {e}")
             return None
 
@@ -62,7 +63,7 @@ class LunarCrushConnector:
         self.api_key = settings.LUNARCRUSH_API_KEY
         self.base_url = "https://lunarcrush.com/api4"
 
-    def get_sentiment(self, symbol: str):
+    async def get_sentiment(self, symbol: str):
         """
         Fetches sentiment for a given cryptocurrency symbol.
         """
@@ -71,10 +72,11 @@ class LunarCrushConnector:
             "Authorization": f"Bearer {self.api_key}"
         }
         try:
-            response = requests.get(url, headers=headers)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
             print(f"An error occurred while fetching sentiment from LunarCrush: {e}")
             return None
 
@@ -83,7 +85,7 @@ class CryptoCompareConnector:
         self.api_key = settings.CRYPTOCOMPARE_API_KEY
         self.base_url = "https://min-api.cryptocompare.com"
 
-    def get_sentiment(self, coin_id: str):
+    async def get_sentiment(self, coin_id: str):
         """
         Fetches sentiment for a given coin ID.
         """
@@ -93,10 +95,11 @@ class CryptoCompareConnector:
             "api_key": self.api_key,
         }
         try:
-            response = requests.get(url, params=params)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
             print(f"An error occurred while fetching sentiment from CryptoCompare: {e}")
             return None
 
@@ -104,23 +107,24 @@ class FearAndGreedConnector:
     def __init__(self):
         self.url = "https://api.alternative.me/fng/"
 
-    def get_latest(self):
+    async def get_latest(self):
         """
         Fetches the latest Crypto Fear & Greed Index.
         Returns dict with value (0-100) and classification (e.g. 'Extreme Fear').
         """
         try:
-            response = requests.get(self.url)
-            response.raise_for_status()
-            data = response.json()
-            if "data" in data and len(data["data"]) > 0:
-                item = data["data"][0]
-                return {
-                    "value": int(item.get("value", 50)),
-                    "value_classification": item.get("value_classification", "Neutral"),
-                    "timestamp": int(item.get("timestamp", 0)),
-                    "time_until_update": int(item.get("time_until_update", 0))
-                }
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(self.url)
+                response.raise_for_status()
+                data = response.json()
+                if "data" in data and len(data["data"]) > 0:
+                    item = data["data"][0]
+                    return {
+                        "value": int(item.get("value", 50)),
+                        "value_classification": item.get("value_classification", "Neutral"),
+                        "timestamp": int(item.get("timestamp", 0)),
+                        "time_until_update": int(item.get("time_until_update", 0))
+                    }
             return None
         except Exception as e:
             print(f"Error fetching Fear & Greed index: {e}")
@@ -134,19 +138,36 @@ class Sentiment:
         self.cryptocompare_connector = CryptoCompareConnector()
         self.fng_connector = FearAndGreedConnector()
 
-    def get_sentiment(self, query: str):
+    async def get_sentiment(self, query: str):
         # fng is global, not per-symbol usually, but we include it contextually
-        fng = self.fng_connector.get_latest()
+        import asyncio
         
-        stockgeist_sentiment = self.stockgeist_connector.get_crypto_sentiment(symbol=query)
-        santiment_sentiment = self.santiment_connector.get_sentiment(slug=query)
-        lunarcrush_sentiment = self.lunarcrush_connector.get_sentiment(symbol=query)
-        cryptocompare_sentiment = self.cryptocompare_connector.get_sentiment(coin_id=query)
+        # Santiment is synchronous library client, wrap in thread
+        # Others are async
+        
+        async def fetch_santiment():
+             if self.santiment_connector._san is None:
+                 return {"status": "disabled"}
+             return await asyncio.to_thread(self.santiment_connector.get_sentiment, query)
+
+        results = await asyncio.gather(
+            self.fng_connector.get_latest(),
+            self.stockgeist_connector.get_crypto_sentiment(symbol=query),
+            fetch_santiment(),
+            self.lunarcrush_connector.get_sentiment(symbol=query),
+            self.cryptocompare_connector.get_sentiment(coin_id=query),
+            return_exceptions=True
+        )
+        
+        # Unpack results handling exceptions
+        fng, stockgeist, santiment, lunarcrush, cryptocompare = [
+            r if not isinstance(r, Exception) else None for r in results
+        ]
         
         return {
             "fear_and_greed": fng,
-            "stockgeist": stockgeist_sentiment,
-            "santiment": santiment_sentiment,
-            "lunarcrush": lunarcrush_sentiment,
-            "cryptocompare": cryptocompare_sentiment,
+            "stockgeist": stockgeist,
+            "santiment": santiment,
+            "lunarcrush": lunarcrush,
+            "cryptocompare": cryptocompare,
         }

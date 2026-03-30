@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 import json
 from datetime import datetime, timedelta, timezone
 import asyncio
+import os
+import logging
 
 import pandas as pd
 from celery.result import AsyncResult
@@ -14,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.analysis import add_technical_indicators
 from app.analysis_quant import calculate_risk_metrics
 from app.config import settings
+from app.services.price_selection import resolve_price_exchange
 from app.connectors.fundamental import CoinGeckoConnector
 from app.connectors.sentiment import Sentiment
 from app.connectors.news_api import NewsConnector
@@ -23,10 +26,13 @@ from app.connectors.financialmodelingprep import FinancialModelingPrepConnector
 from app.connectors.newsdata_io import NewsDataIoConnector
 from app.redis_client import redis_client
 from app.models.market import MarketTrade
-from app.models.instrument import Price
+from app.models.imports import ImportRun
+from app.models.instrument import Coin, Price
+from app.models.ticks import Asset, Tick
 from celery_app import celery_app
 from app.signals.engine import SignalEngine
-from database import get_db, init_db
+from app.services.data_quality import detect_gaps_data
+from database import get_db, init_db, session_scope
 
 
 def get_coingecko_connector() -> CoinGeckoConnector:
@@ -48,29 +54,47 @@ def get_newsdata_connector() -> NewsDataIoConnector:
     return NewsDataIoConnector()
 
 
-from app.services.backfill import StartupGapFiller
+from app.services.backfill import StartupGapFiller, bootstrap_universe
 
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        logger = logging.getLogger("cryptoinsight.main")
+        logger.info("🚀 CryptoInsight starting up...")
+        
+        # Initialize database
         init_db()
-        await StartupGapFiller.run_startup_check()
+        
+        # Run bootstrap in background (non-blocking)
+        if os.getenv("PYTEST_CURRENT_TEST") is None:
+            logger.info("📊 Triggering universe bootstrap...")
+            asyncio.create_task(bootstrap_universe())
+            
+            # Also run startup gap filler for ongoing maintenance
+            await StartupGapFiller.run_startup_check()
+        
         yield
+        
+        logger.info("👋 CryptoInsight shutting down...")
 
     app = FastAPI(
         title=settings.APP_NAME,
         version="0.1.0",
         lifespan=lifespan,
-        docs_url=f"{settings.API_PREFIX}/docs",
-        redoc_url=f"{settings.API_PREFIX}/redoc",
+        docs_url="/docs",
+        redoc_url="/redoc",
         openapi_url=f"{settings.API_PREFIX}/openapi.json",
     )
 
     from fastapi.middleware.cors import CORSMiddleware
 
+    # Parse allowed origins from environment
+    allowed_origins = [origin.strip() for origin in settings.ALLOWED_ORIGINS.split(",") if origin.strip()]
+    
+    print(f"DEBUG: Setting up CORS Middleware with allow_origins={allowed_origins}")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+        allow_origins=allowed_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -78,9 +102,13 @@ def create_app() -> FastAPI:
 
     api = APIRouter(prefix=settings.API_PREFIX)
     
-    from app.routers import portfolio, system
+    from app.routers import backtest, imports, paper_trading, portfolio, system, auth
     api.include_router(portfolio.router)
     api.include_router(system.router)
+    api.include_router(imports.router)
+    api.include_router(backtest.router)
+    api.include_router(paper_trading.router)
+    api.include_router(auth.router)
 
     @api.get("/health", tags=["Meta"])
     async def health():
@@ -178,73 +206,336 @@ def create_app() -> FastAPI:
     @api.get("/coins", tags=["Data"])
     async def get_coins_list(
         background_tasks: BackgroundTasks,
-        cg: CoinGeckoConnector = Depends(get_coingecko_connector)
+        cg: CoinGeckoConnector = Depends(get_coingecko_connector),
+        db: Session = Depends(get_db),
+        limit: int = Query(default=500, ge=1, le=5000, description="Max coins to return."),
+        offset: int = Query(default=0, ge=0, description="Pagination offset."),
+        search: str | None = Query(default=None, description="Filter by symbol or name."),
+        source: str = Query(default="auto", description="auto, db, coingecko"),
     ):
         """
-        Returns top coins. Uses stale-while-revalidate caching:
-        - If cache exists, return it immediately.
-        - If cache is older than 10 mins, trigger background refresh.
-        - If cache missing, fetch synchronously (blocking).
+        Returns coins from the local DB when available, with a CoinGecko fallback.
+
+        When DB is empty and source=auto, trigger ingestion and fall back to CoinGecko.
         """
+        source_key = (source or "auto").strip().lower()
+        if source_key not in {"auto", "db", "coingecko"}:
+            raise HTTPException(status_code=400, detail="source must be auto, db, or coingecko")
+
+        if source_key in {"auto", "db"}:
+            query = db.query(Coin)
+            if search:
+                like = f"%{search.strip()}%"
+                query = query.filter(Coin.symbol.ilike(like) | Coin.name.ilike(like))
+
+            total = query.count()
+            if total > 0:
+                rank_order = func.coalesce(Coin.market_cap_rank, 999999)
+                rows = (
+                    query.order_by(rank_order.asc(), Coin.symbol.asc())
+                    .offset(offset)
+                    .limit(limit)
+                    .all()
+                )
+
+                symbols_base = []
+                for c in rows:
+                    s = (c.symbol or "").strip().upper().replace("/", "-")
+                    if s:
+                        symbols_base.append(s)
+
+                price_exchange = _select_exchange_for_symbols(db, symbols_base)
+
+                latest_sub = (
+                    db.query(
+                        Price.symbol.label("symbol"),
+                        func.max(Price.timestamp).label("max_ts"),
+                    )
+                    .filter(Price.exchange == price_exchange)
+                    .group_by(Price.symbol)
+                    .subquery()
+                )
+
+                latest_rows = (
+                    db.query(Price.symbol, Price.close)
+                    .join(
+                        latest_sub,
+                        (Price.symbol == latest_sub.c.symbol)
+                        & (Price.timestamp == latest_sub.c.max_ts)
+                        & (Price.exchange == price_exchange),
+                    )
+                    .all()
+                )
+                latest_price = {
+                    (symbol or "").upper(): float(close) if close is not None else None
+                    for symbol, close in latest_rows
+                }
+
+                # --- NEW: Fetch Featured Analysis (Signals/RSI) Efficiently ---
+                # Key format from get_trading_signal: f"signal:{exchange_key}:{symbol}:{lookback}:{latest_ts}"
+                # We'll rely on redis cache inside generation if possible, but here we run the engine batch.
+                
+                # Symbols to fetch (already normalized for exchange? No, these come from DB Coin/Gecko)
+                # DB Symbols are like "BTC", "ETH". But Price needs "BTC-USD".
+                # We inferred that logic in backfill, we do similar here.
+                # Heuristic: If symbol has no dash, append -USD for the signal check
+                symbols_page = []
+                for c in rows:
+                    s = (c.symbol or "").strip().upper().replace("/", "-")
+                    s = StartupGapFiller._normalize_symbol_for_exchange(s, price_exchange)
+                    symbols_page.append(s)
+
+                analysis_map = {}
+                
+                # Run batch signal generation
+                # We limit lookback to 60 candles (enough for RSI/SMA50) for speed in this list view
+                # Using asyncio.to_thread to not block the event loop
+                # We also set a hard timeout of 5 seconds. If signals take too long, we return list without them.
+                # Signals Caching Logic
+                signals_cache_key = f"signals:batch:v2:{price_exchange}:{offset}:{limit}"
+                cached_signals = None
+                try:
+                    raw_signals = await redis_client.get(signals_cache_key)
+                    if raw_signals:
+                        cached_signals = json.loads(raw_signals)
+                except Exception:
+                    pass
+
+                if cached_signals:
+                    analysis_map = cached_signals
+                else:
+                    try:
+                        engine = SignalEngine(db)
+                        exchange_map = {sym: price_exchange for sym in symbols_page}
+                        batch_signals = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                engine.generate_signals_batch,
+                                symbols_page,
+                                exchange_map,
+                                60,
+                                False,
+                            ),
+                            timeout=20.0
+                        )
+                        
+                        # Serialize for Cache & Map
+                        temp_map = {}
+                        for sig in batch_signals:
+                            # Map back to symbol. Note: Signal returns normalized symbol e.g. BTC-USD
+                            # We store by symbol key directly
+                            temp_map[sig.symbol] = {
+                                "signal": sig.signal_type.value.upper().replace("_", " "), # STRONG BUY
+                                "rsi": sig.indicators.get("rsi"),
+                                "confidence": sig.confidence
+                            }
+                        
+                        analysis_map = temp_map
+                        
+                        # Save to Cache
+                        try:
+                            await redis_client.setex(signals_cache_key, 300, json.dumps(analysis_map))
+                        except Exception as e:
+                            print(f"Failed to cache signals: {e}")
+
+                    except asyncio.TimeoutError:
+                        print(f"Batch signal generation timed out for {len(symbols_page)} coins. Returning partial data.")
+                        # Do not fail request, just show empty signals
+                    except Exception as e:
+                        print(f"Batch signal error: {e}")
+                        pass
+
+                payload = []
+                for coin in rows:
+                    price_val = latest_price.get((coin.symbol or "").upper())
+                    if price_val is None and coin.current_price is not None:
+                        price_val = float(coin.current_price)
+                        
+                    # Resolve Analysis from Map
+                    key = (coin.symbol or "").strip().upper().replace("/", "-")
+                    key = StartupGapFiller._normalize_symbol_for_exchange(key, price_exchange)
+                    
+                    analysis_data = analysis_map.get(key, {})
+
+                    payload.append(
+                        {
+                            "id": coin.id,
+                            "symbol": coin.symbol,
+                            "name": coin.name,
+                            "image": coin.image,
+                            "market_cap_rank": coin.market_cap_rank,
+                            "market_cap": float(coin.market_cap) if coin.market_cap is not None else None,
+                            "current_price": price_val,
+                            "price_change_percentage_24h": coin.price_change_percentage_24h,
+                            "last_updated": coin.last_updated.isoformat() if coin.last_updated else None,
+                            "analysis": {
+                                "rsi": analysis_data.get("rsi"), 
+                                "signal": analysis_data.get("signal"),
+                                "confidence": analysis_data.get("confidence")
+                            }
+                        }
+                    )
+                return payload
+
+            if source_key == "db":
+                return []
+
+            if _should_enqueue_celery():
+                try:
+                    celery_app.send_task("celery_worker.tasks.fetch_and_store_coin_list")
+                except Exception:
+                    pass
+
         cache_key = "coins_list_v2"
-        REFRESH_INTERVAL = 600  # 10 minutes
-        
+        refresh_interval = 600  # 10 minutes
+
         async def _refresh_cache():
             try:
-                # Reduced fetch size to 50 for speed, user focused on top/uncommon search
                 new_coins = await asyncio.to_thread(cg.get_all_coins, per_page=50, page=1)
                 if new_coins:
                     cache_value = {
                         "timestamp": datetime.now(timezone.utc).timestamp(),
-                        "data": new_coins
+                        "data": new_coins,
                     }
-                    # Set long physical TTL (24h) so we always have *something*
-                    await redis_client.setex(cache_key, 86400, json.dumps(cache_value))
+                    try:
+                        await redis_client.setex(cache_key, 86400, json.dumps(cache_value))
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f"Background coin refresh failed: {e}")
 
-        # 1. Try Cache
-        raw = await redis_client.get(cache_key)
-        
+        try:
+            raw = await redis_client.get(cache_key)
+        except Exception:
+            raw = None
+
         if raw:
             try:
                 cached = json.loads(raw)
-                # cached might be list (old format) or dict (new format)
                 if isinstance(cached, list):
-                    # Legacy format migration
                     data = cached
                     age = 999999
                 else:
                     data = cached.get("data", [])
                     ts = cached.get("timestamp", 0)
                     age = datetime.now(timezone.utc).timestamp() - ts
-                
-                # 2. Check Freshness
-                if age > REFRESH_INTERVAL:
-                    background_tasks.add_task(_refresh_cache)
-                
+
+                if age > refresh_interval:
+                    asyncio.create_task(_refresh_cache())
+
                 return data
             except Exception:
-                # If parse fails, fall through
                 pass
-        
-        # 3. Cache Miss (Blocking)
-        # This only happens on first boot or if cache expires (24h)
+
         coins = await asyncio.to_thread(cg.get_all_coins, per_page=50, page=1)
         if coins:
             cache_value = {
                 "timestamp": datetime.now(timezone.utc).timestamp(),
-                "data": coins
+                "data": coins,
             }
-            await redis_client.setex(cache_key, 86400, json.dumps(cache_value))
+            try:
+                await redis_client.setex(cache_key, 86400, json.dumps(cache_value))
+            except Exception:
+                pass
         return coins or []
 
-    @api.get("/market/latest/{symbol:path}", tags=["Data"])
-    async def get_latest_tick(symbol: str):
-        raw = await redis_client.get(f"latest:{symbol}")
-        if not raw:
-            raise HTTPException(status_code=404, detail="No live data yet for this symbol.")
-        return json.loads(raw)
+    @api.get("/coins/search", tags=["Data"])
+    async def search_coins(
+        q: str = Query(..., description="Search query for coin name or symbol"),
+        cg: CoinGeckoConnector = Depends(get_coingecko_connector),
+        limit: int = Query(default=20, ge=1, le=100, description="Max results to return"),
+    ):
+        """
+        Search for coins by name or symbol using CoinGecko API.
+        Returns coins that are not yet in the local database.
+        """
+        try:
+            # Get all coins from CoinGecko
+            all_coins = await asyncio.to_thread(cg.get_all_coins, per_page=250, page=1)
+            
+            if not all_coins:
+                return []
+            
+            # Filter by search query
+            query_lower = q.lower().strip()
+            matching_coins = [
+                coin for coin in all_coins
+                if query_lower in (coin.get("symbol", "").lower()) or 
+                   query_lower in (coin.get("name", "").lower())
+            ]
+            
+            # Return limited results
+            return matching_coins[:limit]
+            
+        except Exception as e:
+            logger.error(f"Coin search failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+    @api.post("/coins/add", tags=["Data"])
+    async def add_coin_to_tracking(
+        payload: dict,
+        db: Session = Depends(get_db),
+    ):
+        """
+        Add a coin to tracking database and trigger historical data backfill.
+        
+        Payload: {"coingecko_id": "bitcoin", "symbol": "BTC", "name": "Bitcoin"}
+        """
+        coingecko_id = payload.get("id") or payload.get("coingecko_id")
+        symbol = payload.get("symbol", "").upper()
+        name = payload.get("name", "")
+        
+        if not coingecko_id or not symbol:
+            raise HTTPException(status_code=400, detail="coingecko_id and symbol are required")
+        
+        try:
+            # Check if coin already exists
+            existing = db.query(Coin).filter(Coin.symbol == symbol).first()
+            
+            if existing:
+                return {
+                    "message": f"{symbol} already exists in database",
+                    "coin_id": existing.id,
+                    "existed": True
+                }
+            
+            # Insert new coin
+            new_coin = Coin(
+                coingecko_id=coingecko_id,
+                symbol=symbol,
+                name=name,
+                market_cap_rank=None,  # Will be updated by next coin list fetch
+            )
+            db.add(new_coin)
+            db.commit()
+            db.refresh(new_coin)
+            
+            logger.info(f"Added new coin to tracking: {symbol} ({name})")
+            
+            # Trigger backfill for this coin
+            exchange = settings.STREAM_EXCHANGE or "coinbase"
+            symbol_pair = f"{symbol}-USD"  # Assume USD pair for now
+            
+            backfill_task = celery_app.send_task(
+                "celery_worker.tasks.backfill_historical_candles",
+                kwargs={
+                    "symbol": symbol_pair,
+                    "exchange_id": exchange.lower(),
+                    "days": 7,
+                    "timeframe": "1m"
+                }
+            )
+            
+            return {
+                "message": f"Successfully added {symbol} to tracking",
+                "coin_id": new_coin.id,
+                "existed": False,
+                "backfill_task_id": backfill_task.id
+            }
+            
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to add coin {symbol}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to add coin: {str(e)}")
 
     @api.get("/market/latest/{exchange}/{symbol:path}", tags=["Data"])
     async def get_latest_tick_for_exchange(exchange: str, symbol: str):
@@ -258,6 +549,13 @@ def create_app() -> FastAPI:
         raw = await redis_client.get(f"latest:{exchange}:{symbol}")
         if not raw:
             raise HTTPException(status_code=404, detail="No live data yet for this exchange/symbol.")
+        return json.loads(raw)
+
+    @api.get("/market/latest/{symbol:path}", tags=["Data"])
+    async def get_latest_tick(symbol: str):
+        raw = await redis_client.get(f"latest:{symbol}")
+        if not raw:
+            raise HTTPException(status_code=404, detail="No live data yet for this symbol.")
         return json.loads(raw)
 
     @api.get("/exchanges", tags=["Meta"])
@@ -338,6 +636,7 @@ def create_app() -> FastAPI:
             )
         return result
 
+
     def _to_utc(dt: datetime) -> datetime:
         if dt.tzinfo is None:
             return dt.replace(tzinfo=timezone.utc)
@@ -350,12 +649,51 @@ def create_app() -> FastAPI:
             symbol = f"{base}-{quote}"
         return symbol
 
-    def _normalize_symbol_for_exchange(exchange: str, symbol: str) -> str:
-        exchange = exchange.strip().lower()
+    def _normalize_symbol_for_exchange(exchange: str | None, symbol: str) -> str:
+        exchange = (exchange or "").strip().lower()
+        if not exchange:
+            priority = _priority_exchanges()
+            exchange = priority[0] if priority else ""
         symbol = _normalize_dash_symbol(symbol)
         if exchange == "binance" and symbol.endswith("-USD"):
             return f"{symbol[:-4]}-USDT"
+        if exchange == "coinbase" and "-" not in symbol:
+            return f"{symbol}-USD"
         return symbol
+
+    
+    def _priority_exchanges() -> list[str]:
+        raw = (settings.PRICE_EXCHANGE_PRIORITY or "").strip()
+        if not raw:
+            raw = (settings.STREAM_EXCHANGES or settings.STREAM_EXCHANGE or "").strip()
+        if not raw:
+            return ["coinbase"]
+        return [part.strip().lower() for part in raw.split(",") if part.strip()]
+
+    def _select_exchange_for_symbols(db: Session, symbols: list[str]) -> str:
+        priority = _priority_exchanges()
+        if not priority:
+            return "coinbase"
+        for ex in priority:
+            normalized = [_normalize_symbol_for_exchange(ex, s) for s in symbols if s]
+            if not normalized:
+                continue
+            hit = (
+                db.query(Price.symbol)
+                .filter(Price.exchange == ex, Price.symbol.in_(normalized))
+                .limit(1)
+                .first()
+            )
+            if hit:
+                return ex
+        return priority[0]
+
+    def _resolve_asset_id(db: Session, exchange: str, symbol: str) -> int | None:
+        return (
+            db.query(Asset.id)
+            .filter(Asset.exchange == exchange, Asset.symbol == symbol)
+            .scalar()
+        )
 
     def _choose_bucket_seconds(range_seconds: float, max_points: int) -> int:
         max_points = max(1, max_points)
@@ -404,6 +742,146 @@ def create_app() -> FastAPI:
             raise ValueError(f"Unsupported timeframe={timeframe!r}")
         return seconds
 
+    def _should_enqueue_celery() -> bool:
+        return os.getenv("PYTEST_CURRENT_TEST") is None
+
+    def _align_bucket_time(dt: datetime, bucket_seconds: int) -> datetime:
+        epoch = int(dt.timestamp() // bucket_seconds) * bucket_seconds
+        return datetime.fromtimestamp(epoch, tz=timezone.utc)
+
+    def _query_agg_series(
+        db: Session,
+        *,
+        asset_id: int,
+        start_dt: datetime,
+        end_dt: datetime,
+        bucket_seconds: int,
+        view_name: str,
+        view_bucket_seconds: int,
+    ) -> tuple[list[dict], int]:
+        effective_bucket = max(bucket_seconds, view_bucket_seconds)
+        bucket_interval = f"{effective_bucket} seconds"
+        sql = text(
+            f"""
+            SELECT
+              time_bucket(CAST(:bucket AS interval), bucket) AS bucket,
+              AVG(close) AS price,
+              SUM(volume) AS volume,
+              SUM(trades) AS trades
+            FROM {view_name}
+            WHERE asset_id = :asset_id
+              AND bucket >= :start
+              AND bucket <= :end
+            GROUP BY bucket
+            ORDER BY bucket ASC
+            """
+        )
+        try:
+            rows = (
+                db.execute(
+                    sql,
+                    {
+                        "bucket": bucket_interval,
+                        "asset_id": asset_id,
+                        "start": start_dt,
+                        "end": end_dt,
+                    },
+                )
+                .mappings()
+                .all()
+            )
+        except Exception:
+            return [], bucket_seconds
+
+        points: list[dict] = []
+        for row in rows:
+            bucket = row.get("bucket")
+            price = row.get("price")
+            volume = row.get("volume")
+            trades = row.get("trades")
+            if bucket is None or price is None:
+                continue
+            points.append(
+                {
+                    "timestamp": bucket.isoformat(),
+                    "price": float(price),
+                    "volume": float(volume) if volume is not None else 0.0,
+                    "trades": int(trades) if trades is not None else 0,
+                }
+            )
+        return points, effective_bucket
+
+    def _query_agg_candles(
+        db: Session,
+        *,
+        asset_id: int,
+        start_dt: datetime,
+        end_dt: datetime,
+        bucket_seconds: int,
+        view_name: str,
+        view_bucket_seconds: int,
+    ) -> tuple[list[dict], int]:
+        effective_bucket = max(bucket_seconds, view_bucket_seconds)
+        bucket_interval = f"{effective_bucket} seconds"
+        sql = text(
+            f"""
+            SELECT
+              time_bucket(CAST(:bucket AS interval), bucket) AS bucket,
+              first(open, bucket) AS open,
+              max(high) AS high,
+              min(low) AS low,
+              last(close, bucket) AS close,
+              SUM(volume) AS volume,
+              SUM(trades) AS trades
+            FROM {view_name}
+            WHERE asset_id = :asset_id
+              AND bucket >= :start
+              AND bucket <= :end
+            GROUP BY bucket
+            ORDER BY bucket ASC
+            """
+        )
+        try:
+            rows = (
+                db.execute(
+                    sql,
+                    {
+                        "bucket": bucket_interval,
+                        "asset_id": asset_id,
+                        "start": start_dt,
+                        "end": end_dt,
+                    },
+                )
+                .mappings()
+                .all()
+            )
+        except Exception:
+            return [], bucket_seconds
+
+        candles: list[dict] = []
+        for row in rows:
+            bucket = row.get("bucket")
+            open_p = row.get("open")
+            high_p = row.get("high")
+            low_p = row.get("low")
+            close_p = row.get("close")
+            volume = row.get("volume")
+            trades = row.get("trades")
+            if bucket is None or open_p is None or high_p is None or low_p is None or close_p is None:
+                continue
+            candles.append(
+                {
+                    "timestamp": bucket.isoformat(),
+                    "open": float(open_p),
+                    "high": float(high_p),
+                    "low": float(low_p),
+                    "close": float(close_p),
+                    "volume": float(volume) if volume is not None else 0.0,
+                    "trades": int(trades) if trades is not None else 0,
+                }
+            )
+        return candles, effective_bucket
+
     @api.get("/market/series/{exchange}/{symbol:path}", tags=["Data"])
     async def get_market_series(
         exchange: str,
@@ -419,7 +897,20 @@ def create_app() -> FastAPI:
         Uses TimescaleDB `time_bucket` on Postgres; falls back to Python bucketing for SQLite/tests.
         """
         exchange = exchange.strip().lower()
-        symbol = _normalize_symbol_for_exchange(exchange, symbol)
+        base_symbol = symbol
+        if exchange == "auto":
+            base_symbol = _normalize_dash_symbol(symbol)
+            exchange = _select_exchange_for_symbols(db, [base_symbol])
+        symbol = _normalize_symbol_for_exchange(exchange, base_symbol)
+
+        # Trigger live subscription for this symbol when possible.
+        try:
+            await redis_client.publish(
+                "streamer:commands",
+                json.dumps({"action": "subscribe", "symbol": symbol, "exchange": exchange}),
+            )
+        except Exception:
+            pass
 
         end_dt = _to_utc(end) if end else datetime.now(timezone.utc)
         start_dt = _to_utc(start) if start else end_dt - timedelta(hours=1)
@@ -431,7 +922,78 @@ def create_app() -> FastAPI:
 
         dialect = db.get_bind().dialect.name
         points: list[dict] = []
-        if dialect == "postgresql":
+        asset_id = _resolve_asset_id(db, exchange, symbol)
+
+        if dialect == "postgresql" and asset_id:
+            bucket_interval = f"{bucket_seconds} seconds"
+            sql = text(
+                """
+                SELECT
+                  time_bucket(CAST(:bucket AS interval), time) AS bucket,
+                  AVG(price) AS price,
+                  SUM(volume) AS volume,
+                  COUNT(*) AS trades
+                FROM ticks
+                WHERE asset_id = :asset_id
+                  AND time >= :start
+                  AND time <= :end
+                GROUP BY bucket
+                ORDER BY bucket ASC
+                """
+            )
+            try:
+                rows = (
+                    db.execute(
+                        sql,
+                        {
+                            "bucket": bucket_interval,
+                            "asset_id": asset_id,
+                            "start": start_dt,
+                            "end": end_dt,
+                        },
+                    )
+                    .mappings()
+                    .all()
+                )
+                for row in rows:
+                    bucket = row.get("bucket")
+                    price = row.get("price")
+                    volume = row.get("volume")
+                    trades = row.get("trades")
+                    if bucket is None or price is None:
+                        continue
+                    points.append(
+                        {
+                            "timestamp": bucket.isoformat(),
+                            "price": float(price),
+                            "volume": float(volume) if volume is not None else 0.0,
+                            "trades": int(trades) if trades is not None else 0,
+                        }
+                    )
+            except Exception:
+                points = []
+
+        if not points and dialect == "postgresql" and asset_id:
+            for view_name, view_bucket in (
+                ("ticks_1s", 1),
+                ("ticks_3s", 3),
+                ("ticks_5s", 5),
+                ("ticks_7s", 7),
+            ):
+                points, candidate_bucket = _query_agg_series(
+                    db,
+                    asset_id=asset_id,
+                    start_dt=start_dt,
+                    end_dt=end_dt,
+                    bucket_seconds=bucket_seconds,
+                    view_name=view_name,
+                    view_bucket_seconds=view_bucket,
+                )
+                if points:
+                    bucket_seconds = candidate_bucket
+                    break
+
+        if not points and dialect == "postgresql":
             bucket_interval = f"{bucket_seconds} seconds"
             sql = text(
                 """
@@ -482,6 +1044,51 @@ def create_app() -> FastAPI:
             except Exception:
                 # If Timescale functions are unavailable, fall back to Python bucketing.
                 points = []
+
+        if not points and asset_id:
+            rows = (
+                db.query(Tick)
+                .filter(
+                    Tick.asset_id == asset_id,
+                    Tick.time >= start_dt,
+                    Tick.time <= end_dt,
+                )
+                .order_by(Tick.time.asc())
+                .all()
+            )
+            buckets: dict[int, dict] = {}
+            for row in rows:
+                ts = row.time
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                bucket_idx = int((ts - start_dt).total_seconds() // bucket_seconds)
+                item = buckets.get(bucket_idx)
+                if item is None:
+                    item = {
+                        "timestamp": (start_dt + timedelta(seconds=bucket_idx * bucket_seconds)).isoformat(),
+                        "sum_price": float(row.price),
+                        "count": 1,
+                        "volume": float(row.volume),
+                    }
+                    buckets[bucket_idx] = item
+                else:
+                    item["sum_price"] += float(row.price)
+                    item["count"] += 1
+                    item["volume"] += float(row.volume)
+
+            for bucket_idx in sorted(buckets.keys()):
+                item = buckets[bucket_idx]
+                count = int(item["count"])
+                if count <= 0:
+                    continue
+                points.append(
+                    {
+                        "timestamp": item["timestamp"],
+                        "price": float(item["sum_price"]) / count,
+                        "volume": float(item["volume"]),
+                        "trades": count,
+                    }
+                )
 
         if not points:
             rows = (
@@ -549,13 +1156,17 @@ def create_app() -> FastAPI:
         max_points: int = Query(default=2000, ge=100, le=5000, description="Max candles returned (server may coarsen)."),
     ):
         """
-        Returns OHLCV candles derived from persisted tick trades in `market_trades`.
+        Returns OHLCV candles derived from persisted tick trades in `ticks`.
 
         - Uses TimescaleDB `time_bucket` + `first/last` on Postgres.
-        - Falls back to Python aggregation for SQLite/tests.
+        - Falls back to market_trades and Python aggregation for SQLite/tests.
         """
         exchange = exchange.strip().lower()
-        symbol = _normalize_symbol_for_exchange(exchange, symbol)
+        base_symbol = symbol
+        if exchange == "auto":
+            base_symbol = _normalize_dash_symbol(symbol)
+            exchange = _select_exchange_for_symbols(db, [base_symbol])
+        symbol = _normalize_symbol_for_exchange(exchange, base_symbol)
 
         end_dt = _to_utc(end) if end else datetime.now(timezone.utc)
         start_dt = _to_utc(start) if start else end_dt - timedelta(hours=1)
@@ -572,7 +1183,86 @@ def create_app() -> FastAPI:
 
         candles: list[dict] = []
         dialect = db.get_bind().dialect.name
-        if dialect == "postgresql":
+        asset_id = _resolve_asset_id(db, exchange, symbol)
+        if dialect == "postgresql" and asset_id:
+            bucket_interval = f"{bucket_seconds} seconds"
+            sql = text(
+                """
+                SELECT
+                  time_bucket(CAST(:bucket AS interval), time) AS bucket,
+                  first(price, time) AS open,
+                  max(price) AS high,
+                  min(price) AS low,
+                  last(price, time) AS close,
+                  SUM(volume) AS volume,
+                  COUNT(*) AS trades
+                FROM ticks
+                WHERE asset_id = :asset_id
+                  AND time >= :start
+                  AND time <= :end
+                GROUP BY bucket
+                ORDER BY bucket ASC
+                """
+            )
+            try:
+                rows = (
+                    db.execute(
+                        sql,
+                        {
+                            "bucket": bucket_interval,
+                            "asset_id": asset_id,
+                            "start": start_dt,
+                            "end": end_dt,
+                        },
+                    )
+                    .mappings()
+                    .all()
+                )
+                for row in rows:
+                    bucket = row.get("bucket")
+                    open_p = row.get("open")
+                    high_p = row.get("high")
+                    low_p = row.get("low")
+                    close_p = row.get("close")
+                    volume = row.get("volume")
+                    trades = row.get("trades")
+                    if bucket is None or open_p is None or high_p is None or low_p is None or close_p is None:
+                        continue
+                    candles.append(
+                        {
+                            "timestamp": bucket.isoformat(),
+                            "open": float(open_p),
+                            "high": float(high_p),
+                            "low": float(low_p),
+                            "close": float(close_p),
+                            "volume": float(volume) if volume is not None else 0.0,
+                            "trades": int(trades) if trades is not None else 0,
+                        }
+                    )
+            except Exception:
+                candles = []
+
+        if not candles and dialect == "postgresql" and asset_id:
+            for view_name, view_bucket in (
+                ("ticks_1s", 1),
+                ("ticks_3s", 3),
+                ("ticks_5s", 5),
+                ("ticks_7s", 7),
+            ):
+                candles, candidate_bucket = _query_agg_candles(
+                    db,
+                    asset_id=asset_id,
+                    start_dt=start_dt,
+                    end_dt=end_dt,
+                    bucket_seconds=bucket_seconds,
+                    view_name=view_name,
+                    view_bucket_seconds=view_bucket,
+                )
+                if candles:
+                    bucket_seconds = candidate_bucket
+                    break
+
+        if not candles and dialect == "postgresql":
             bucket_interval = f"{bucket_seconds} seconds"
             sql = text(
                 """
@@ -632,6 +1322,50 @@ def create_app() -> FastAPI:
             except Exception:
                 candles = []
 
+        if not candles and asset_id:
+            rows = (
+                db.query(Tick)
+                .filter(
+                    Tick.asset_id == asset_id,
+                    Tick.time >= start_dt,
+                    Tick.time <= end_dt,
+                )
+                .order_by(Tick.time.asc())
+                .all()
+            )
+            buckets: dict[int, dict] = {}
+            for row in rows:
+                ts = row.time
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                else:
+                    ts = ts.astimezone(timezone.utc)
+
+                # Align buckets to epoch boundaries to match time_bucket behavior.
+                bucket_epoch = int(ts.timestamp() // bucket_seconds) * bucket_seconds
+                item = buckets.get(bucket_epoch)
+                price = float(row.price)
+                amount = float(row.volume)
+                if item is None:
+                    buckets[bucket_epoch] = {
+                        "timestamp": datetime.fromtimestamp(bucket_epoch, tz=timezone.utc).isoformat(),
+                        "open": price,
+                        "high": price,
+                        "low": price,
+                        "close": price,
+                        "volume": amount,
+                        "trades": 1,
+                    }
+                else:
+                    item["high"] = max(float(item["high"]), price)
+                    item["low"] = min(float(item["low"]), price)
+                    item["close"] = price
+                    item["volume"] = float(item["volume"]) + amount
+                    item["trades"] = int(item["trades"]) + 1
+
+            for bucket_epoch in sorted(buckets.keys()):
+                candles.append(buckets[bucket_epoch])
+
         if not candles:
             rows = (
                 db.query(MarketTrade)
@@ -682,6 +1416,7 @@ def create_app() -> FastAPI:
             prices_rows = (
                 db.query(Price)
                 .filter(
+                    Price.exchange == exchange,
                     Price.symbol == symbol,
                     Price.timestamp >= start_dt,
                     Price.timestamp <= end_dt,
@@ -725,6 +1460,22 @@ def create_app() -> FastAPI:
             for bucket_epoch in sorted(buckets.keys()):
                 candles.append(buckets[bucket_epoch])
 
+        backfill_status = None
+        if not candles and _should_enqueue_celery():
+            try:
+                from celery_worker.tasks import backfill_historical_candles
+                range_days = max(1, int((end_dt - start_dt).total_seconds() // 86400) + 1)
+                days = min(90, range_days)
+                task = backfill_historical_candles.delay(
+                    symbol=symbol,
+                    exchange_id=exchange,
+                    timeframe=timeframe,
+                    days=days,
+                )
+                backfill_status = {"queued": True, "task_id": task.id, "days": days}
+            except Exception:
+                backfill_status = {"queued": False}
+
         return {
             "exchange": exchange,
             "symbol": symbol,
@@ -734,6 +1485,7 @@ def create_app() -> FastAPI:
             "requested_bucket_seconds": requested_bucket_seconds,
             "bucket_seconds": bucket_seconds,
             "candles": candles,
+            "backfill": backfill_status,
         }
 
     @api.get("/market/coverage/{exchange}/{symbol:path}", tags=["Data"])
@@ -744,7 +1496,99 @@ def create_app() -> FastAPI:
         Useful for validating that the writer is storing trades and for estimating how much historic data you have.
         """
         exchange = exchange.strip().lower()
-        symbol = _normalize_symbol_for_exchange(exchange, symbol)
+        base_symbol = symbol
+        if exchange == "auto":
+            base_symbol = _normalize_dash_symbol(symbol)
+            exchange = _select_exchange_for_symbols(db, [base_symbol])
+        symbol = _normalize_symbol_for_exchange(exchange, base_symbol)
+        dialect = db.get_bind().dialect.name
+        asset_id = _resolve_asset_id(db, exchange, symbol)
+
+        if asset_id:
+            if dialect == "postgresql":
+                sql = text(
+                    """
+                    SELECT
+                      min(time) AS first_ts,
+                      max(time) AS last_ts,
+                      count(*) AS trades
+                    FROM ticks
+                    WHERE asset_id = :asset_id
+                    """
+                )
+                try:
+                    row = (
+                        db.execute(sql, {"asset_id": asset_id})
+                        .mappings()
+                        .one()
+                    )
+                    first_ts = row.get("first_ts")
+                    last_ts = row.get("last_ts")
+                    count = row.get("trades")
+                except Exception:
+                    first_ts = last_ts = count = None
+            else:
+                first_ts, last_ts, count = (
+                    db.query(
+                        func.min(Tick.time),
+                        func.max(Tick.time),
+                        func.count(Tick.id),
+                    )
+                    .filter(Tick.asset_id == asset_id)
+                    .one()
+                )
+
+            if count:
+                return {
+                    "exchange": exchange,
+                    "symbol": symbol,
+                    "trades": int(count or 0),
+                    "first_timestamp": first_ts.isoformat() if first_ts else None,
+                    "last_timestamp": last_ts.isoformat() if last_ts else None,
+                    "source": "ticks",
+                }
+
+            if dialect == "postgresql":
+                for view_name, view_bucket in (
+                    ("ticks_1s", 1),
+                    ("ticks_3s", 3),
+                    ("ticks_5s", 5),
+                    ("ticks_7s", 7),
+                ):
+                    try:
+                        sql = text(
+                            f"""
+                            SELECT
+                              min(bucket) AS first_ts,
+                              max(bucket) AS last_ts,
+                              SUM(trades) AS trades
+                            FROM {view_name}
+                            WHERE asset_id = :asset_id
+                            """
+                        )
+                        row = (
+                            db.execute(sql, {"asset_id": asset_id})
+                            .mappings()
+                            .one()
+                        )
+                    except Exception:
+                        continue
+
+                    count = row.get("trades")
+                    if count:
+                        return {
+                            "exchange": exchange,
+                            "symbol": symbol,
+                            "trades": int(count or 0),
+                            "first_timestamp": row.get("first_ts").isoformat()
+                            if row.get("first_ts")
+                            else None,
+                            "last_timestamp": row.get("last_ts").isoformat()
+                            if row.get("last_ts")
+                            else None,
+                            "source": view_name,
+                            "granularity_seconds": view_bucket,
+                        }
 
         first_ts, last_ts, count = (
             db.query(
@@ -762,23 +1606,327 @@ def create_app() -> FastAPI:
             "trades": int(count or 0),
             "first_timestamp": first_ts.isoformat() if first_ts else None,
             "last_timestamp": last_ts.isoformat() if last_ts else None,
+            "source": "market_trades",
+        }
+
+    @api.get("/market/gaps/{exchange}/{symbol:path}", tags=["Data"])
+    async def get_market_gaps(
+        exchange: str,
+        symbol: str,
+        db: Session = Depends(get_db),
+        start: datetime | None = Query(default=None, description="Start time (ISO 8601). Defaults to 1h ago."),
+        end: datetime | None = Query(default=None, description="End time (ISO 8601). Defaults to now (UTC)."),
+        bucket_seconds: int = Query(default=1, ge=1, description="Gap bucket size in seconds."),
+        max_points: int = Query(default=5000, ge=100, le=20000, description="Max buckets to evaluate."),
+        source: str = Query(
+            default="auto",
+            description="auto, ticks, ticks_1s, ticks_3s, ticks_5s, ticks_7s, market_trades",
+        ),
+    ):
+        """
+        Detects empty buckets (gaps) in the requested time range at a given resolution.
+
+        Note: a gap means "no data recorded in the bucket" at the chosen resolution,
+        not necessarily that trades were missing on the exchange.
+        """
+        exchange = exchange.strip().lower()
+        base_symbol = symbol
+        if exchange == "auto":
+            base_symbol = _normalize_dash_symbol(symbol)
+            exchange = _select_exchange_for_symbols(db, [base_symbol])
+        symbol = _normalize_symbol_for_exchange(exchange, base_symbol)
+
+        end_dt = _to_utc(end) if end else datetime.now(timezone.utc)
+        start_dt = _to_utc(start) if start else end_dt - timedelta(hours=1)
+        if start_dt > end_dt:
+            raise HTTPException(status_code=400, detail="Invalid time range: start must be <= end.")
+
+        gap_data = detect_gaps_data(
+            db,
+            exchange=exchange,
+            symbol=symbol,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            bucket_seconds=bucket_seconds,
+            max_points=max_points,
+            source=source,
+        )
+
+        return {
+            "exchange": exchange,
+            "symbol": symbol,
+            "source": gap_data["source"],
+            "source_granularity_seconds": gap_data["source_granularity_seconds"],
+            "start": gap_data["aligned_start"].isoformat(),
+            "end": gap_data["aligned_end"].isoformat(),
+            "bucket_seconds": bucket_seconds,
+            "total_buckets": gap_data["total_buckets"],
+            "covered_buckets": gap_data["covered_buckets"],
+            "missing_buckets": gap_data["missing_buckets"],
+            "gaps": gap_data["gaps"],
+        }
+
+    @api.post("/market/gaps/repair/{exchange}/{symbol:path}", tags=["Data"])
+    async def repair_market_gaps(
+        exchange: str,
+        symbol: str,
+        db: Session = Depends(get_db),
+        start: datetime | None = Query(default=None, description="Start time (ISO 8601). Defaults to 1h ago."),
+        end: datetime | None = Query(default=None, description="End time (ISO 8601). Defaults to now (UTC)."),
+        bucket_seconds: int = Query(default=1, ge=1, description="Gap bucket size in seconds."),
+        max_points: int = Query(default=5000, ge=100, le=20000, description="Max buckets to evaluate."),
+        source: str = Query(
+            default="auto",
+            description="auto, ticks, ticks_1s, ticks_3s, ticks_5s, ticks_7s, market_trades",
+        ),
+        import_source: str = Query(default="binance_vision", description="binance_vision or dukascopy"),
+        kind: str = Query(default="trades", description="Binance Vision kind: trades or aggTrades"),
+        store_exchange: str | None = Query(default=None, description="Exchange label to store with imported data."),
+        owner_id: str | None = Query(default=None),
+        max_ranges: int = Query(default=5, ge=1, le=50),
+        dry_run: bool = Query(default=False),
+    ):
+        """
+        Queue backfill jobs for missing buckets using bulk data sources.
+
+        Note: bulk sources are coarse (daily or hourly). Small gaps may still result
+        in large data pulls, but idempotency prevents duplicates.
+        """
+        exchange = exchange.strip().lower()
+        base_symbol = symbol
+        if exchange == "auto":
+            base_symbol = _normalize_dash_symbol(symbol)
+            exchange = _select_exchange_for_symbols(db, [base_symbol])
+        symbol = _normalize_symbol_for_exchange(exchange, base_symbol)
+        import_source = import_source.strip().lower()
+        kind = kind.strip()
+
+        end_dt = _to_utc(end) if end else datetime.now(timezone.utc)
+        start_dt = _to_utc(start) if start else end_dt - timedelta(hours=1)
+        if start_dt > end_dt:
+            raise HTTPException(status_code=400, detail="Invalid time range: start must be <= end.")
+
+        gap_data = detect_gaps_data(
+            db,
+            exchange=exchange,
+            symbol=symbol,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            bucket_seconds=bucket_seconds,
+            max_points=max_points,
+            source=source,
+        )
+
+        gap_ranges = gap_data["gaps"]
+        if not gap_ranges:
+            return {
+                "exchange": exchange,
+                "symbol": symbol,
+                "source": gap_data["source"],
+                "gaps": [],
+                "planned_tasks": [],
+                "queued": False,
+                "message": "No gaps detected.",
+            }
+
+        if import_source not in {"binance_vision", "dukascopy"}:
+            raise HTTPException(status_code=400, detail="Unsupported import_source.")
+
+        enqueue = (not dry_run) and _should_enqueue_celery()
+        planned: list[dict] = []
+
+        if import_source == "binance_vision":
+            import_symbol = _normalize_symbol_for_exchange("binance", symbol)
+            exchange_label = store_exchange or "binance"
+            if kind.lower() in {"agg_trades", "aggtrades"}:
+                kind = "aggTrades"
+            elif kind.lower() != "trades":
+                raise HTTPException(status_code=400, detail="kind must be trades or aggTrades")
+
+            for gap_range in gap_ranges[:max_ranges]:
+                gap_start = datetime.fromisoformat(gap_range["start"])
+                gap_end = datetime.fromisoformat(gap_range["end"])
+                inclusive_end = gap_end - timedelta(seconds=1)
+                start_date = gap_start.date().isoformat()
+                end_date = inclusive_end.date().isoformat()
+                params = {
+                    "symbol": import_symbol,
+                    "exchange": exchange_label,
+                    "kind": kind,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "owner_id": owner_id,
+                }
+                planned.append({"task": "import_binance_vision_range", **params})
+                if enqueue:
+                    celery_app.send_task("celery_worker.tasks.import_binance_vision_range", kwargs=params)
+
+        if import_source == "dukascopy":
+            import_symbol = symbol
+            exchange_label = store_exchange or "dukascopy"
+            for gap_range in gap_ranges[:max_ranges]:
+                gap_start = datetime.fromisoformat(gap_range["start"])
+                gap_end = datetime.fromisoformat(gap_range["end"])
+                params = {
+                    "symbol": import_symbol,
+                    "exchange": exchange_label,
+                    "start_datetime": gap_start.isoformat(),
+                    "end_datetime": gap_end.isoformat(),
+                    "owner_id": owner_id,
+                }
+                planned.append({"task": "import_dukascopy_range", **params})
+                if enqueue:
+                    celery_app.send_task("celery_worker.tasks.import_dukascopy_range", kwargs=params)
+
+        return {
+            "exchange": exchange,
+            "symbol": symbol,
+            "source": gap_data["source"],
+            "gaps": gap_ranges[:max_ranges],
+            "planned_tasks": planned,
+            "queued": enqueue,
+            "skipped_gaps": max(0, len(gap_ranges) - max_ranges),
+        }
+
+    @api.get("/system/ingestion/health", tags=["System"])
+    async def get_ingestion_health(
+        db: Session = Depends(get_db),
+        exchange: str = Query(default="coinbase"),
+        symbols: str | None = Query(default=None, description="Comma-separated symbols (e.g. BTC-USD,ETH-USD)"),
+        lookback_hours: int = Query(default=24, ge=1, le=168),
+    ):
+        exchange = exchange.strip().lower()
+        raw_symbols = symbols or settings.CORE_UNIVERSE
+        symbol_list = [_normalize_symbol_for_exchange(exchange, s) for s in raw_symbols.split(",") if s.strip()]
+
+        now = datetime.now(timezone.utc)
+        redis_ok = True
+        latest_stream: dict[str, datetime | None] = {}
+
+        if symbol_list:
+            keys = [f"latest:{exchange}:{sym}" for sym in symbol_list]
+            try:
+                raw_values = await redis_client.mget(keys)
+            except Exception:
+                redis_ok = False
+                raw_values = [None] * len(keys)
+
+            for sym, raw in zip(symbol_list, raw_values):
+                if not raw:
+                    latest_stream[sym] = None
+                    continue
+                try:
+                    payload = json.loads(raw)
+                    ts = payload.get("ts")
+                    latest_stream[sym] = (
+                        datetime.fromtimestamp(float(ts), tz=timezone.utc) if ts is not None else None
+                    )
+                except Exception:
+                    latest_stream[sym] = None
+
+        symbol_health: list[dict] = []
+        for sym in symbol_list:
+            asset_id = _resolve_asset_id(db, exchange, sym)
+            latest_db = None
+            source_used = None
+            if asset_id is not None:
+                latest_db = (
+                    db.query(func.max(Tick.time))
+                    .filter(Tick.asset_id == asset_id)
+                    .scalar()
+                )
+                if latest_db:
+                    source_used = "ticks"
+            if latest_db is None:
+                latest_db = (
+                    db.query(func.max(MarketTrade.timestamp))
+                    .filter(MarketTrade.exchange == exchange, MarketTrade.symbol == sym)
+                    .scalar()
+                )
+                if latest_db:
+                    source_used = "market_trades"
+
+            stream_ts = latest_stream.get(sym)
+            if latest_db and latest_db.tzinfo is None:
+                latest_db = latest_db.replace(tzinfo=timezone.utc)
+            stream_lag = (now - stream_ts).total_seconds() if stream_ts else None
+            db_lag = (now - latest_db).total_seconds() if latest_db else None
+
+            symbol_health.append(
+                {
+                    "symbol": sym,
+                    "latest_stream_timestamp": stream_ts.isoformat() if stream_ts else None,
+                    "latest_db_timestamp": latest_db.isoformat() if latest_db else None,
+                    "stream_lag_seconds": stream_lag,
+                    "db_lag_seconds": db_lag,
+                    "source": source_used,
+                }
+            )
+
+        cutoff = now - timedelta(hours=lookback_hours)
+        import_counts = (
+            db.query(ImportRun.status, func.count(ImportRun.id))
+            .filter(ImportRun.started_at >= cutoff)
+            .group_by(ImportRun.status)
+            .all()
+        )
+        import_summary = {status: count for status, count in import_counts}
+
+        return {
+            "checked_at": now.isoformat(),
+            "exchange": exchange,
+            "redis_ok": redis_ok,
+            "symbols": symbol_health,
+            "imports": {
+                "lookback_hours": lookback_hours,
+                "counts": import_summary,
+            },
         }
 
     @api.get("/coin/{symbol:path}/analysis", tags=["Analysis"])
-    async def get_coin_analysis(symbol: str, db: Session = Depends(get_db)):
+    async def get_coin_analysis(
+        symbol: str,
+        exchange: str | None = Query(
+            default="auto",
+            description="Exchange to use (auto or exchange id).",
+        ),
+        db: Session = Depends(get_db),
+    ):
+        symbol = _normalize_dash_symbol(symbol)
+        exchange_key = resolve_price_exchange(db, symbol, exchange)
+        symbol = _normalize_symbol_for_exchange(exchange_key, symbol)
         # 1. Get Latest Timestamp (Lightweight Query)
-        latest_ts = db.query(func.max(Price.timestamp)).filter(Price.symbol == symbol).scalar()
+        latest_ts = db.query(func.max(Price.timestamp)).filter(Price.exchange == exchange_key, Price.symbol == symbol).scalar()
         
         if not latest_ts:
             # Trigger On-Demand Backfill
             from celery_worker.tasks import backfill_historical_candles
-            backfill_historical_candles.delay(symbol=symbol)
+            if _should_enqueue_celery():
+                try:
+                    backfill_historical_candles.delay(symbol=symbol, exchange_id=exchange_key)
+                except Exception:
+                    pass
             return []
+
+        # 1.5 Dynamic Streamer Trigger
+        # Ensure that viewing this coin triggers a live data subscription if not already active.
+        try:
+            await redis_client.publish("streamer:commands", json.dumps({
+                "action": "subscribe",
+                "symbol": symbol,
+                "exchange": exchange_key
+            }))
+        except Exception as e:
+            # Non-blocking failure; we don't want to fail the API call if Redis PubSub fails
+            print(f"Failed to trigger dynamic subscription: {e}")
 
         # 2. Check Cache (Keyed by Symbol + Timestamp)
         # This ensures we always serve fresh results without re-calculating if data hasn't changed
-        cache_key = f"analysis:{symbol}:{int(latest_ts.timestamp())}"
-        cached_result = await redis_client.get(cache_key)
+        cache_key = f"analysis:{exchange_key}:{symbol}:{int(latest_ts.timestamp())}"
+        try:
+            cached_result = await redis_client.get(cache_key)
+        except Exception:
+            cached_result = None
         
         if cached_result:
              try:
@@ -789,7 +1937,7 @@ def create_app() -> FastAPI:
         # 3. Compute (Cache Miss)
         price_data = (
             db.query(Price)
-            .filter(Price.symbol == symbol)
+            .filter(Price.exchange == exchange_key, Price.symbol == symbol)
             .order_by(Price.timestamp.desc())
             .limit(500)
             .all()
@@ -798,7 +1946,9 @@ def create_app() -> FastAPI:
         df = pd.DataFrame(
             [(p.timestamp, float(p.high), float(p.low), float(p.open), float(p.close), float(p.volume) if p.volume else 0.0) for p in price_data],
             columns=["timestamp", "high", "low", "open", "close", "volume"],
-        ).sort_values(by="timestamp")
+        )
+        df = df.drop_duplicates(subset=["timestamp"], keep="last")
+        df = df.sort_values(by="timestamp")
         
         for col in ("close", "high", "low", "volume"):
             df[col] = pd.to_numeric(df[col])
@@ -819,35 +1969,57 @@ def create_app() -> FastAPI:
         }
         
         # Cache for 24h (or until timestamp changes, effectively forever for this specific candle set)
-        await redis_client.setex(cache_key, 86400, json.dumps(response))
+        try:
+            await redis_client.setex(cache_key, 86400, json.dumps(response))
+        except Exception:
+            pass
         
         return response
 
     @api.get("/coin/{symbol:path}/quant", tags=["Analysis"])
-    async def get_coin_quant_metrics(symbol: str, db: Session = Depends(get_db)):
+    async def get_coin_quant_metrics(
+        symbol: str,
+        exchange: str | None = Query(
+            default="auto",
+            description="Exchange to use (auto or exchange id).",
+        ),
+        db: Session = Depends(get_db),
+    ):
         """
         Returns institutional-grade quantitative risk metrics (Sharpe, Sortino, Volatility, etc.)
         """
+        symbol = _normalize_dash_symbol(symbol)
+        exchange_key = resolve_price_exchange(db, symbol, exchange)
+        symbol = _normalize_symbol_for_exchange(exchange_key, symbol)
         # 1. Get Latest Timestamp
-        latest_ts = db.query(func.max(Price.timestamp)).filter(Price.symbol == symbol).scalar()
+        latest_ts = db.query(func.max(Price.timestamp)).filter(Price.exchange == exchange_key, Price.symbol == symbol).scalar()
         
         if not latest_ts:
              # Trigger On-Demand Backfill
             from celery_worker.tasks import backfill_historical_candles
-            backfill_historical_candles.delay(symbol=symbol)
-            
-            # Return empty metrics
-            return {
+            if _should_enqueue_celery():
+                try:
+                    backfill_historical_candles.delay(symbol=symbol, exchange_id=exchange_key)
+                except Exception:
+                    pass
+
+            metrics = {
                 "annualized_volatility": 0.0,
                 "sharpe_ratio": 0.0,
                 "max_drawdown": 0.0,
                 "sortino_ratio": 0.0,
-                "calculated_at": datetime.now(timezone.utc).isoformat()
+            }
+            return {
+                "calculated_at": datetime.now(timezone.utc).isoformat(),
+                "data": metrics,
             }
             
         # 2. Check Cache
-        cache_key = f"quant:{symbol}:{int(latest_ts.timestamp())}"
-        cached_result = await redis_client.get(cache_key)
+        cache_key = f"quant:{exchange_key}:{symbol}:{int(latest_ts.timestamp())}"
+        try:
+            cached_result = await redis_client.get(cache_key)
+        except Exception:
+            cached_result = None
         
         if cached_result:
              try:
@@ -858,7 +2030,7 @@ def create_app() -> FastAPI:
         # 3. Compute (Cache Miss)
         price_data = (
             db.query(Price)
-            .filter(Price.symbol == symbol)
+            .filter(Price.exchange == exchange_key, Price.symbol == symbol)
             .order_by(Price.timestamp.desc())
             .limit(365) # 1 year lookback for quant metrics
             .all()
@@ -883,7 +2055,10 @@ def create_app() -> FastAPI:
             "data": metrics
         }
         # Cache for 24h (versioned by timestamp)
-        await redis_client.setex(cache_key, 86400, json.dumps(response))
+        try:
+            await redis_client.setex(cache_key, 86400, json.dumps(response))
+        except Exception:
+            pass
         
         return response
 
@@ -1043,12 +2218,70 @@ def create_app() -> FastAPI:
         Returns sentiment data from multiple sources + Fear & Greed Index.
         """
         sentiment_engine = Sentiment()
-        return sentiment_engine.get_sentiment(query)
+        return await sentiment_engine.get_sentiment(query)
 
     # --- Signal Generation ---
+    @api.get("/signals/batch", tags=["Analysis"])
+    async def get_batch_signals(
+        db: Session = Depends(get_db),
+        symbols: str = Query(default="BTC-USD,ETH-USD,SOL-USD", description="Comma-separated symbols"),
+        exchange: str | None = Query(
+            default="auto",
+            description="Exchange to use (auto or exchange id).",
+        ),
+    ):
+        """
+        Generate trading signals for multiple symbols.
+        Cached for 60 seconds to prevent dashboard overload.
+        """
+        exchange_key = (exchange or "auto").strip().lower()
+
+        # Check Cache
+        cache_key = f"signals:batch:{exchange_key}:{symbols.replace(' ', '')}"
+        cached = await redis_client.get(cache_key)
+        if cached:
+            try:
+                return json.loads(cached)
+            except:
+                pass
+
+        symbol_list = [s.strip().upper().replace("/", "-") for s in symbols.split(",") if s.strip()]
+        if not symbol_list:
+            raise HTTPException(status_code=400, detail="No symbols provided")
+        
+        exchange_map = {
+            sym: (exchange_key if exchange_key != "auto" else resolve_price_exchange(db, sym, exchange_key))
+            for sym in symbol_list
+        }
+        exchange_map = {sym: ex for sym, ex in exchange_map.items() if ex}
+
+        engine = SignalEngine(db)
+        # Run in threadpool
+        signals = await asyncio.to_thread(
+            engine.generate_signals_batch,
+            symbol_list,
+            exchange_map=exchange_map,
+            include_externals=False,
+        )
+        
+        response = {
+            "count": len(signals),
+            "signals": [s.to_dict() for s in signals],
+            "calculated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Cache for 60s
+        await redis_client.setex(cache_key, 60, json.dumps(response))
+        
+        return response
+
     @api.get("/signals/{symbol:path}", tags=["Analysis"])
     async def get_trading_signal(
         symbol: str,
+        exchange: str | None = Query(
+            default="auto",
+            description="Exchange to use (auto or exchange id).",
+        ),
         db: Session = Depends(get_db),
         lookback: int = Query(default=500, ge=50, le=2000, description="Number of candles to analyze"),
     ):
@@ -1056,9 +2289,12 @@ def create_app() -> FastAPI:
         Generate a trading signal for the given symbol.
         """
         symbol = symbol.strip().upper().replace("/", "-")
-        
+        exchange_key = resolve_price_exchange(db, symbol, exchange)
+        symbol = _normalize_symbol_for_exchange(exchange_key, symbol)
+        if not exchange_key:
+            raise HTTPException(status_code=404, detail="No price data available for this symbol.")
         # 1. Get Latest Timestamp
-        latest_ts = db.query(func.max(Price.timestamp)).filter(Price.symbol == symbol).scalar()
+        latest_ts = db.query(func.max(Price.timestamp)).filter(Price.exchange == exchange_key, Price.symbol == symbol).scalar()
         
         if not latest_ts:
              raise HTTPException(
@@ -1067,7 +2303,7 @@ def create_app() -> FastAPI:
             )
 
         # 2. Check Cache
-        cache_key = f"signal:{symbol}:{lookback}:{int(latest_ts.timestamp())}"
+        cache_key = f"signal:{exchange_key}:{symbol}:{lookback}:{int(latest_ts.timestamp())}"
         cached = await redis_client.get(cache_key)
         if cached:
             try:
@@ -1078,7 +2314,7 @@ def create_app() -> FastAPI:
         # 3. Compute (Cache Miss)
         engine = SignalEngine(db)
         # Run in threadpool
-        signal = await asyncio.to_thread(engine.generate_signal, symbol, lookback=lookback)
+        signal = await asyncio.to_thread(engine.generate_signal, symbol, lookback=lookback, exchange=exchange_key)
         
         if signal is None:
             raise HTTPException(
@@ -1093,43 +2329,6 @@ def create_app() -> FastAPI:
         
         return response
 
-    @api.get("/signals/batch", tags=["Analysis"])
-    async def get_batch_signals(
-        db: Session = Depends(get_db),
-        symbols: str = Query(default="BTC-USD,ETH-USD,SOL-USD", description="Comma-separated symbols"),
-    ):
-        """
-        Generate trading signals for multiple symbols.
-        Cached for 60 seconds to prevent dashboard overload.
-        """
-        # Check Cache
-        cache_key = f"signals:batch:{symbols.replace(' ', '')}"
-        cached = await redis_client.get(cache_key)
-        if cached:
-            try:
-                return json.loads(cached)
-            except:
-                pass
-
-        symbol_list = [s.strip().upper().replace("/", "-") for s in symbols.split(",") if s.strip()]
-        if not symbol_list:
-            raise HTTPException(status_code=400, detail="No symbols provided")
-        
-        engine = SignalEngine(db)
-        # Run in threadpool
-        signals = await asyncio.to_thread(engine.generate_signals_batch, symbol_list)
-        
-        response = {
-            "count": len(signals),
-            "signals": [s.to_dict() for s in signals],
-            "calculated_at": datetime.now(timezone.utc).isoformat()
-        }
-        
-        # Cache for 60s
-        await redis_client.setex(cache_key, 60, json.dumps(response))
-        
-        return response
-
     app.include_router(api)
 
     @app.get("/", include_in_schema=False)
@@ -1140,3 +2339,16 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+
+
+
+
+
+
+
+
+
+
+
+
+

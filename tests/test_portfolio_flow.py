@@ -1,25 +1,6 @@
-import pytest
 import uuid
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-from app.main import create_app
-from app.database import get_db, Base
-from app.config import settings
-
-# Setup Test DB
-# Connect to REAL Postgres or SQLite for integration?
-# Using SQLite for speed and isolation usually, but we have Postgres models.
-# The `DATABASE_URL` in settings might be the real one.
-# For safety, let's use a standard TestClient with the app's current DB connection
-# assuming it's a dev environment as per user instructions.
-# OR, better: mock the session. But "End-to-End" implies real DB interactions.
-
-app = create_app()
-client = TestClient(app)
-
-def test_portfolio_lifecycle():
+def test_portfolio_lifecycle(client):
     # 1. Create Portfolio
     # Use random name to avoid collision
     pf_name = f"TestFund_{uuid.uuid4().hex[:8]}"

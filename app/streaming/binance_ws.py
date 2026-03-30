@@ -5,7 +5,7 @@ from typing import Any
 
 from app.streaming.base_ws import BaseTradeStreamer
 from app.streaming.publisher import RedisPublisher
-from app.streaming.symbols import CanonicalSymbol
+from app.streaming.symbols import CanonicalSymbol, parse_symbol
 from app.config import settings
 
 
@@ -72,6 +72,26 @@ class BinanceTradeStreamer(BaseTradeStreamer):
             price=float(msg.get("p") or 0.0),
             amount=float(msg.get("q") or 0.0),
             side=side,
+            trade_id=str(msg.get("t")) if msg.get("t") is not None else None,
         )
 
+    def _make_subscription_payload(self, symbols: list[str]) -> dict | None:
+        new_params: list[str] = []
+        for raw in symbols:
+            try:
+                sym = parse_symbol(raw)
+            except ValueError:
+                continue
+            market_id, stream = _to_stream_symbol(sym)
+            if stream not in self._subscribe_params:
+                self._subscribe_params.append(stream)
+            self._market_id_to_symbol[market_id.upper()] = f"{sym.base}-{('USDT' if sym.quote == 'USD' else sym.quote)}"
+            new_params.append(stream)
 
+        if not new_params:
+            return None
+        return {
+            "method": "SUBSCRIBE",
+            "params": new_params,
+            "id": int(time.time() * 1000),
+        }

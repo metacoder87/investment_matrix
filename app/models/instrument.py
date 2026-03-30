@@ -6,6 +6,8 @@ from sqlalchemy import (
     DECIMAL,
     JSON,
     Integer,
+    Float,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
@@ -25,7 +27,11 @@ class Coin(Base):
     symbol = Column(String(20), nullable=False, index=True)
     name = Column(String, nullable=False)
     market_cap_rank = Column(Integer)
+    market_cap = Column(DECIMAL)
+    current_price = Column(DECIMAL)
+    price_change_percentage_24h = Column(Float)
     image = Column(String)
+    last_updated = Column(DateTime(timezone=True))
 
     def __repr__(self):
         return f"<Coin(symbol='{self.symbol}', name='{self.name}')>"
@@ -39,8 +45,19 @@ class Price(Base):
 
     __tablename__ = "prices"
 
+    __table_args__ = (
+        UniqueConstraint("exchange", "symbol", "timestamp", name="uix_price_exchange_symbol_timestamp"),
+    )
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     symbol = Column(String(20), nullable=False, index=True)
+    exchange = Column(
+        String(20),
+        nullable=False,
+        index=True,
+        default="coinbase",
+        server_default="coinbase",
+    )
     timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
     open = Column(DECIMAL)
     high = Column(DECIMAL)
@@ -62,6 +79,13 @@ class Indicator(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     symbol = Column(String(20), nullable=False, index=True)
+    exchange = Column(
+        String(20),
+        nullable=False,
+        index=True,
+        default="coinbase",
+        server_default="coinbase",
+    )
     timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
     rsi = Column(DECIMAL)
     macd = Column(DECIMAL)
@@ -126,3 +150,4 @@ class NewsArticle(Base):
 
     def __repr__(self):
         return f"<NewsArticle(title='{self.title}', source='{self.source}')>"
+

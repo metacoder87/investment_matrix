@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Wallet, TrendingUp, TrendingDown, Plus, PieChart, ArrowUpRight, ArrowDownRight } from "lucide-react";
+import { Wallet, TrendingUp, TrendingDown, Plus, PieChart, ArrowUpRight, ArrowDownRight, ChevronDown } from "lucide-react";
+import { getApiBaseUrl } from "@/utils/api";
 
 interface Holding {
     symbol: string;
@@ -22,7 +23,14 @@ interface PortfolioSummary {
     holdings: Holding[];
 }
 
+interface PortfolioListItem {
+    id: number;
+    name: string;
+}
+
 export default function PortfolioPage() {
+    const [portfolios, setPortfolios] = useState<PortfolioListItem[]>([]);
+    const [selectedPortfolioId, setSelectedPortfolioId] = useState<number | null>(null);
     const [portfolio, setPortfolio] = useState<PortfolioSummary | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -38,10 +46,28 @@ export default function PortfolioPage() {
         amount: 0
     });
 
-    // 1. Fetch Portfolio (Default ID 1 for MVP)
-    const fetchPortfolio = async () => {
+    // Fetch list of portfolios
+    const fetchPortfolioList = async () => {
         try {
-            const res = await fetch("http://localhost:8000/api/portfolio/1");
+            const res = await fetch(`${getApiBaseUrl()}/portfolio/`);
+            if (res.ok) {
+                const data: PortfolioListItem[] = await res.json();
+                setPortfolios(data);
+
+                // Auto-select first portfolio if none selected
+                if (data.length > 0 && !selectedPortfolioId) {
+                    setSelectedPortfolioId(data[0].id);
+                }
+            }
+        } catch (error) {
+            console.error("Failed to fetch portfolio list:", error);
+        }
+    };
+
+    // Fetch specific portfolio details
+    const fetchPortfolio = async (portfolioId: number) => {
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/portfolio/${portfolioId}`);
             if (res.ok) {
                 const data = await res.json();
                 setPortfolio(data);
@@ -55,29 +81,45 @@ export default function PortfolioPage() {
         }
     };
 
+    // Initial load: fetch portfolio list
     useEffect(() => {
-        fetchPortfolio();
-        // Poll for updates (live PnL)
-        const interval = setInterval(fetchPortfolio, 5000);
-        return () => clearInterval(interval);
+        fetchPortfolioList();
     }, []);
 
+    // When selectedPortfolioId changes, fetch that portfolio
+    useEffect(() => {
+        if (selectedPortfolioId !== null) {
+            setIsLoading(true);
+            fetchPortfolio(selectedPortfolioId);
+
+            // Poll for updates (live PnL)
+            const interval = setInterval(() => fetchPortfolio(selectedPortfolioId), 5000);
+            return () => clearInterval(interval);
+        }
+    }, [selectedPortfolioId]);
+
     const handleCreatePortfolio = async () => {
-        const res = await fetch("http://localhost:8000/api/portfolio/", {
+        const res = await fetch(`${getApiBaseUrl()}/portfolio/`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ name: newPortfolioName })
         });
+
         if (res.ok) {
+            const newPortfolio = await res.json();
             setIsCreateModalOpen(false);
-            fetchPortfolio(); // Refresh (will try to fetch ID 1)
+            setNewPortfolioName("");
+
+            // Refresh list and select new portfolio
+            await fetchPortfolioList();
+            setSelectedPortfolioId(newPortfolio.id);
         }
     };
 
     const handleSubmitTrade = async () => {
-        if (!portfolio) return;
+        if (!selectedPortfolioId) return;
 
-        const res = await fetch(`http://localhost:8000/api/portfolio/${portfolio.id}/orders`, {
+        const res = await fetch(`${getApiBaseUrl()}/portfolio/${selectedPortfolioId}/orders`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(tradeForm)
@@ -85,15 +127,17 @@ export default function PortfolioPage() {
 
         if (res.ok) {
             setIsTradeModalOpen(false);
-            fetchPortfolio();
+            fetchPortfolio(selectedPortfolioId);
         } else {
             alert("Failed to place order");
         }
     };
 
-    if (isLoading) return <div className="p-8 text-gray-500">Loading portfolio...</div>;
+    if (isLoading && portfolios.length === 0) {
+        return <div className="p-8 text-gray-500">Loading portfolios...</div>;
+    }
 
-    if (!portfolio) {
+    if (portfolios.length === 0) {
         return (
             <main className="p-8 max-w-7xl mx-auto flex flex-col items-center justify-center min-h-[50vh]">
                 <Wallet className="h-16 w-16 text-gray-600 mb-4" />
@@ -107,7 +151,7 @@ export default function PortfolioPage() {
                 </button>
 
                 {isCreateModalOpen && (
-                    <div className="fixed inset-0 bg-black/80 flex items-center justify-center backdrop-blur-sm">
+                    <div className="fixed inset-0 bg-black/80 flex items-center justify-center backdrop-blur-sm z-50">
                         <div className="bg-surface border border-white/10 p-6 rounded-xl w-96">
                             <h3 className="text-xl font-bold text-white mb-4">Name your Portfolio</h3>
                             <input
@@ -130,94 +174,147 @@ export default function PortfolioPage() {
 
     return (
         <main className="p-8 max-w-7xl mx-auto">
-            {/* Header */}
+            {/* Header with Portfolio Selector */}
             <div className="flex items-center justify-between mb-8">
-                <div>
-                    <h1 className="text-3xl font-bold text-white mb-1">{portfolio.name}</h1>
+                <div className="flex items-center gap-4">
+                    {/* Portfolio Dropdown */}
+                    <div className="relative">
+                        <select
+                            value={selectedPortfolioId || ""}
+                            onChange={(e) => setSelectedPortfolioId(Number(e.target.value))}
+                            className="appearance-none bg-white/5 border border-white/20 rounded-lg pl-4 pr-10 py-2 text-white font-semibold cursor-pointer hover:bg-white/10 transition-colors"
+                        >
+                            {portfolios.map(pf => (
+                                <option key={pf.id} value={pf.id} className="bg-gray-900">
+                                    {pf.name}
+                                </option>
+                            ))}
+                        </select>
+                        <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 pointer-events-none" />
+                    </div>
+
                     <span className="text-sm text-gray-500 flex items-center gap-2">
                         <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
                         Live Optimization Active
                     </span>
                 </div>
-                <button
-                    onClick={() => setIsTradeModalOpen(true)}
-                    className="flex items-center gap-2 px-4 py-2 bg-primary/20 text-primary border border-primary/30 rounded-lg hover:bg-primary/30 transition-colors"
-                >
-                    <Plus className="h-4 w-4" />
-                    New Trade
-                </button>
-            </div>
 
-            {/* Metrics Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                <div className="rounded-xl border border-white/10 bg-surface/50 p-6 backdrop-blur-sm">
-                    <div className="text-sm text-gray-400 mb-2">Total Balance</div>
-                    <div className="text-3xl font-bold font-mono text-white">
-                        ${portfolio.total_value.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                    </div>
-                </div>
-                <div className="rounded-xl border border-white/10 bg-surface/50 p-6 backdrop-blur-sm">
-                    <div className="text-sm text-gray-400 mb-2">Unrealized PnL</div>
-                    <div className={`text-3xl font-bold font-mono flex items-center gap-2 ${portfolio.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                        {portfolio.unrealized_pnl >= 0 ? '+' : ''}
-                        ${portfolio.unrealized_pnl.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                        <span className={`text-sm px-2 py-1 rounded-full ${portfolio.unrealized_pnl >= 0 ? 'bg-green-500/10' : 'bg-red-500/10'}`}>
-                            {((portfolio.unrealized_pnl / (portfolio.total_cost || 1)) * 100).toFixed(2)}%
-                        </span>
-                    </div>
-                </div>
-                <div className="rounded-xl border border-white/10 bg-surface/50 p-6 backdrop-blur-sm">
-                    <div className="text-sm text-gray-400 mb-2">Total Cost Basis</div>
-                    <div className="text-3xl font-bold font-mono text-gray-300">
-                        ${portfolio.total_cost.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                    </div>
+                <div className="flex gap-2">
+                    <button
+                        onClick={() => setIsCreateModalOpen(true)}
+                        className="flex items-center gap-2 px-4 py-2 bg-white/5 text-gray-300 border border-white/10 rounded-lg hover:bg-white/10 transition-colors"
+                    >
+                        <Plus className="h-4 w-4" />
+                        New Portfolio
+                    </button>
+                    <button
+                        onClick={() => setIsTradeModalOpen(true)}
+                        className="flex items-center gap-2 px-4 py-2 bg-primary/20 text-primary border border-primary/30 rounded-lg hover:bg-primary/30 transition-colors"
+                    >
+                        <Plus className="h-4 w-4" />
+                        New Trade
+                    </button>
                 </div>
             </div>
 
-            {/* Holdings Table */}
-            <div className="rounded-xl border border-white/10 bg-surface/50 overflow-hidden">
-                <div className="p-4 border-b border-white/10 bg-white/5 flex items-center justify-between">
-                    <h2 className="font-semibold text-gray-200">Current Holdings</h2>
-                    <PieChart className="h-5 w-5 text-gray-500" />
-                </div>
-
-                {portfolio.holdings.length === 0 ? (
-                    <div className="p-8 text-center text-gray-500">
-                        No assets in this portfolio. Add a trade to get started.
+            {isLoading ? (
+                <div className="p-8 text-center text-gray-500">Loading portfolio data...</div>
+            ) : !portfolio ? (
+                <div className="p-8 text-center text-gray-500">Failed to load portfolio</div>
+            ) : (
+                <>
+                    {/* Metrics Grid */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                        <div className="rounded-xl border border-white/10 bg-surface/50 p-6 backdrop-blur-sm">
+                            <div className="text-sm text-gray-400 mb-2">Total Balance</div>
+                            <div className="text-3xl font-bold font-mono text-white">
+                                ${portfolio.total_value.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                            </div>
+                        </div>
+                        <div className="rounded-xl border border-white/10 bg-surface/50 p-6 backdrop-blur-sm">
+                            <div className="text-sm text-gray-400 mb-2">Unrealized PnL</div>
+                            <div className={`text-3xl font-bold font-mono flex items-center gap-2 ${portfolio.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                {portfolio.unrealized_pnl >= 0 ? '+' : ''}
+                                ${portfolio.unrealized_pnl.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                <span className={`text-sm px-2 py-1 rounded-full ${portfolio.unrealized_pnl >= 0 ? 'bg-green-500/10' : 'bg-red-500/10'}`}>
+                                    {((portfolio.unrealized_pnl / (portfolio.total_cost || 1)) * 100).toFixed(2)}%
+                                </span>
+                            </div>
+                        </div>
+                        <div className="rounded-xl border border-white/10 bg-surface/50 p-6 backdrop-blur-sm">
+                            <div className="text-sm text-gray-400 mb-2">Total Cost Basis</div>
+                            <div className="text-3xl font-bold font-mono text-gray-300">
+                                ${portfolio.total_cost.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                            </div>
+                        </div>
                     </div>
-                ) : (
-                    <table className="w-full text-left border-collapse">
-                        <thead>
-                            <tr className="text-xs text-gray-500 border-b border-white/5">
-                                <th className="p-4 font-medium">Asset</th>
-                                <th className="p-4 font-medium text-right">Qty</th>
-                                <th className="p-4 font-medium text-right">Avg Entry</th>
-                                <th className="p-4 font-medium text-right">Current Price</th>
-                                <th className="p-4 font-medium text-right">Value</th>
-                                <th className="p-4 font-medium text-right">PnL</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {portfolio.holdings.map((h) => (
-                                <tr key={h.symbol} className="border-b border-white/5 hover:bg-white/[0.02]">
-                                    <td className="p-4 font-bold text-white">{h.symbol}</td>
-                                    <td className="p-4 text-right font-mono text-gray-300">{h.quantity}</td>
-                                    <td className="p-4 text-right font-mono text-gray-400">${h.avg_entry_price.toFixed(2)}</td>
-                                    <td className="p-4 text-right font-mono text-white">${h.current_price?.toFixed(2) || "---"}</td>
-                                    <td className="p-4 text-right font-mono text-white font-medium">${h.value?.toLocaleString(undefined, { minimumFractionDigits: 2 }) || "---"}</td>
-                                    <td className={`p-4 text-right font-mono font-bold ${h.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                                        <div className="flex items-center justify-end gap-1">
-                                            {h.unrealized_pnl >= 0 ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
-                                            ${Math.abs(h.unrealized_pnl).toFixed(2)}
-                                            <span className="opacity-50 text-xs">({h.pnl_percent.toFixed(2)}%)</span>
-                                        </div>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                )}
-            </div>
+
+                    {/* Holdings Table */}
+                    <div className="rounded-xl border border-white/10 bg-surface/50 overflow-hidden">
+                        <div className="p-4 border-b border-white/10 bg-white/5 flex items-center justify-between">
+                            <h2 className="font-semibold text-gray-200">Current Holdings</h2>
+                            <PieChart className="h-5 w-5 text-gray-500" />
+                        </div>
+
+                        {portfolio.holdings.length === 0 ? (
+                            <div className="p-8 text-center text-gray-500">
+                                No assets in this portfolio. Add a trade to get started.
+                            </div>
+                        ) : (
+                            <table className="w-full text-left border-collapse">
+                                <thead>
+                                    <tr className="text-xs text-gray-500 border-b border-white/5">
+                                        <th className="p-4 font-medium">Asset</th>
+                                        <th className="p-4 font-medium text-right">Qty</th>
+                                        <th className="p-4 font-medium text-right">Avg Entry</th>
+                                        <th className="p-4 font-medium text-right">Current Price</th>
+                                        <th className="p-4 font-medium text-right">Value</th>
+                                        <th className="p-4 font-medium text-right">PnL</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {portfolio.holdings.map((h) => (
+                                        <tr key={h.symbol} className="border-b border-white/5 hover:bg-white/[0.02]">
+                                            <td className="p-4 font-bold text-white">{h.symbol}</td>
+                                            <td className="p-4 text-right font-mono text-gray-300">{h.quantity}</td>
+                                            <td className="p-4 text-right font-mono text-gray-400">${h.avg_entry_price.toFixed(2)}</td>
+                                            <td className="p-4 text-right font-mono text-white">${h.current_price?.toFixed(2) || "---"}</td>
+                                            <td className="p-4 text-right font-mono text-white font-medium">${h.value?.toLocaleString(undefined, { minimumFractionDigits: 2 }) || "---"}</td>
+                                            <td className={`p-4 text-right font-mono font-bold ${h.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                                <div className="flex items-center justify-end gap-1">
+                                                    {h.unrealized_pnl >= 0 ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
+                                                    ${Math.abs(h.unrealized_pnl).toFixed(2)}
+                                                    <span className="opacity-50 text-xs">({h.pnl_percent.toFixed(2)}%)</span>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        )}
+                    </div>
+                </>
+            )}
+
+            {/* Create Portfolio Modal */}
+            {isCreateModalOpen && (
+                <div className="fixed inset-0 bg-black/80 flex items-center justify-center backdrop-blur-sm z-50">
+                    <div className="bg-surface border border-white/10 p-6 rounded-xl w-96">
+                        <h3 className="text-xl font-bold text-white mb-4">Name your Portfolio</h3>
+                        <input
+                            type="text"
+                            className="w-full bg-black/50 border border-white/20 rounded p-2 text-white mb-4"
+                            placeholder="e.g. Main Fund"
+                            value={newPortfolioName}
+                            onChange={e => setNewPortfolioName(e.target.value)}
+                        />
+                        <div className="flex justify-end gap-2">
+                            <button onClick={() => setIsCreateModalOpen(false)} className="px-4 py-2 text-gray-400">Cancel</button>
+                            <button onClick={handleCreatePortfolio} className="px-4 py-2 bg-primary text-black rounded font-bold">Create</button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Trade Modal */}
             {isTradeModalOpen && (
@@ -303,4 +400,3 @@ export default function PortfolioPage() {
         </main>
     );
 }
-

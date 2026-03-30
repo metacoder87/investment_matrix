@@ -33,7 +33,7 @@ def test_signal_generation_insufficient_data(engine):
     mock_limit = mock_order.limit.return_value
     mock_limit.all.return_value = [] # Empty list
     
-    signal = engine.generate_signal("BTC-USD")
+    signal = engine.generate_signal("BTC-USD", exchange="coinbase")
     
     # Should be None or a specialized "No Data" signal depending on implementation
     # Currently implementation returns None if df empty
@@ -57,7 +57,7 @@ def test_signal_generation_graceful_api_failure(engine, mock_sentiment):
     
     # Should NOT raise exception, just ignore sentiment
     try:
-        signal = engine.generate_signal("BTC-USD")
+        signal = engine.generate_signal("BTC-USD", exchange="coinbase")
         assert signal is not None
         # Sentiment reasosn shouldn't be present
         assert not any("Sentiment" in r for r in signal.reasons)
@@ -79,7 +79,7 @@ def test_signal_conflicting_indicators(engine):
     
     engine.db.query.return_value.filter.return_value.order_by.return_value.limit.return_value.all.return_value = prices
     
-    signal = engine.generate_signal("BTC-USD")
+    signal = engine.generate_signal("BTC-USD", exchange="coinbase")
     
     assert signal is not None
     # We expect some conflict in logic, likely a "Hold" or weak "Buy"/ "Sell"
@@ -90,3 +90,4 @@ def test_signal_conflicting_indicators(engine):
     # Price > SMA usually triggers buy
     # This is a qualitative check that logic ran
     print(f"Conflicting Signal: {signal.signal_type} - {signal.reasons}")
+

@@ -22,6 +22,36 @@ def _enabled_stream_exchanges() -> list[str]:
     return [settings.STREAM_EXCHANGE.strip().upper()]
 
 
+import json
+from app.streaming.base_ws import BaseTradeStreamer
+
+async def _command_listener(redis, streamers: dict[str, BaseTradeStreamer]):
+    pubsub = redis.pubsub()
+    await pubsub.subscribe("streamer:commands")
+    logger.info("Listening for dynamic commands on 'streamer:commands'")
+
+    async for message in pubsub.listen():
+        if message["type"] != "message":
+            continue
+        
+        try:
+            data = json.loads(message["data"])
+            action = data.get("action")
+            
+            if action == "subscribe":
+                symbol = data.get("symbol")
+                exchange = data.get("exchange", "COINBASE").upper()
+                
+                streamer = streamers.get(exchange)
+                if streamer and symbol:
+                    logger.info(f"Received dynamic subscription for {symbol} on {exchange}")
+                    await streamer.subscribe([symbol])
+                else:
+                    logger.warning(f"No streamer found for exchange {exchange} or invalid symbol {symbol}")
+                    
+        except Exception as e:
+            logger.error(f"Error processing command: {e}")
+
 async def run_all() -> None:
     exchanges = _enabled_stream_exchanges()
     symbols = parse_symbol_list(settings.CORE_UNIVERSE)
@@ -32,26 +62,34 @@ async def run_all() -> None:
     publisher = RedisPublisher(redis)
 
     tasks: list[asyncio.Task] = []
+    streamers: dict[str, BaseTradeStreamer] = {}
+
     for exchange in exchanges:
         if exchange == "COINBASE":
-            product_ids = [s.dash() for s in symbols][: settings.STREAM_MAX_SYMBOLS_PER_EXCHANGE]
-            tasks.append(asyncio.create_task(CoinbaseTradeStreamer(product_ids).run_forever(publisher)))
+            # Pass initial symbols
+            initial_ids = [s.dash() for s in symbols][: settings.STREAM_MAX_SYMBOLS_PER_EXCHANGE]
+            streamer = CoinbaseTradeStreamer(initial_ids)
+            streamers["COINBASE"] = streamer
+            tasks.append(asyncio.create_task(streamer.run_forever(publisher)))
+            
         elif exchange == "BINANCE":
-            tasks.append(
-                asyncio.create_task(
-                    BinanceTradeStreamer(symbols[: settings.STREAM_MAX_SYMBOLS_PER_EXCHANGE]).run_forever(publisher)
-                )
-            )
+            streamer = BinanceTradeStreamer(symbols[: settings.STREAM_MAX_SYMBOLS_PER_EXCHANGE])
+            streamers["BINANCE"] = streamer
+            tasks.append(asyncio.create_task(streamer.run_forever(publisher)))
+            
         elif exchange == "KRAKEN":
-            tasks.append(
-                asyncio.create_task(
-                    KrakenTradeStreamer(symbols[: settings.STREAM_MAX_SYMBOLS_PER_EXCHANGE]).run_forever(publisher)
-                )
-            )
+            streamer = KrakenTradeStreamer(symbols[: settings.STREAM_MAX_SYMBOLS_PER_EXCHANGE])
+            streamers["KRAKEN"] = streamer
+            tasks.append(asyncio.create_task(streamer.run_forever(publisher)))
+            
         else:
             raise SystemExit(f"Unsupported STREAM_EXCHANGE: {exchange!r} (supported: COINBASE,BINANCE,KRAKEN)")
 
     logger.info("Streamer started: exchanges=%s symbols=%s", ",".join(exchanges), ",".join([s.dash() for s in symbols]))
+    
+    # Add command listener
+    tasks.append(asyncio.create_task(_command_listener(redis, streamers)))
+    
     await asyncio.gather(*tasks)
 
 

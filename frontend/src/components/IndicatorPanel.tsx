@@ -11,6 +11,7 @@ import {
     LineSeries,
     HistogramSeries,
 } from "lightweight-charts";
+import { getApiBaseUrl } from "@/utils/api";
 
 interface IndicatorPanelProps {
     symbol: string;
@@ -118,7 +119,7 @@ export default function IndicatorPanel({ symbol }: IndicatorPanelProps) {
         // Fetch data
         const fetchData = async () => {
             try {
-                const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+                const baseUrl = getApiBaseUrl();
                 const response = await fetch(`${baseUrl}/coin/${normalizedSymbol}/analysis`);
 
                 if (!response.ok) {

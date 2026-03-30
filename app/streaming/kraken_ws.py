@@ -5,7 +5,7 @@ from typing import Any
 
 from app.streaming.base_ws import BaseTradeStreamer
 from app.streaming.publisher import RedisPublisher
-from app.streaming.symbols import CanonicalSymbol
+from app.streaming.symbols import CanonicalSymbol, parse_symbol
 
 KRAKEN_WS_URL = "wss://ws.kraken.com"
 
@@ -80,4 +80,24 @@ class KrakenTradeStreamer(BaseTradeStreamer):
                 side=side,
             )
 
+    def _make_subscription_payload(self, symbols: list[str]) -> dict | None:
+        new_pairs: list[str] = []
+        for raw in symbols:
+            try:
+                sym = parse_symbol(raw)
+            except ValueError:
+                continue
+            pair, canonical = _to_kraken_pair(sym)
+            if pair not in self._pairs:
+                self._pairs.append(pair)
+            self._pair_to_symbol[pair] = canonical
+            new_pairs.append(pair)
+
+        if not new_pairs:
+            return None
+        return {
+            "event": "subscribe",
+            "pair": new_pairs,
+            "subscription": {"name": "trade"},
+        }
 

@@ -14,6 +14,7 @@ import {
     LineSeries,
     HistogramSeries,
 } from "lightweight-charts";
+import { getApiBaseUrl } from "@/utils/api";
 
 interface CandlestickChartProps {
     symbol: string;
@@ -32,7 +33,7 @@ interface OHLCV {
 
 export default function CandlestickChart({
     symbol,
-    exchange = "coinbase",
+    exchange = "auto",
     timeframe = "1m",
 }: CandlestickChartProps) {
     const chartContainerRef = useRef<HTMLDivElement>(null);
@@ -57,7 +58,7 @@ export default function CandlestickChart({
         setLoading(true);
         setError(null);
         try {
-            const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+            const baseUrl = getApiBaseUrl();
 
             // Calculate time range based on timeframe
             const end = new Date();
@@ -81,9 +82,14 @@ export default function CandlestickChart({
 
             const data = await response.json();
             const candles: OHLCV[] = data.candles || data;
+            const backfillQueued = Boolean(data?.backfill?.queued);
 
             if (!Array.isArray(candles) || candles.length === 0) {
-                setError("No historical data available. Try triggering a backfill first.");
+                setError(
+                    backfillQueued
+                        ? "Backfill queued. Refresh in a moment."
+                        : "No historical data available. Try triggering a backfill first."
+                );
                 setLoading(false);
                 return;
             }
@@ -130,7 +136,7 @@ export default function CandlestickChart({
 
     const fetchIndicators = async () => {
         try {
-            const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+            const baseUrl = getApiBaseUrl();
             const response = await fetch(`${baseUrl}/coin/${normalizedSymbol}/analysis`);
 
             if (!response.ok) return;
@@ -330,8 +336,13 @@ export default function CandlestickChart({
             }
         };
 
-        ws.onerror = (e) => {
-            console.debug("WS Connection Error (Chart)", e);
+        ws.onerror = (error) => {
+            console.error("[CandlestickChart] WebSocket error:", error);
+        };
+
+        ws.onclose = (event) => {
+            console.warn(`[CandlestickChart] WebSocket closed. Code: ${event.code}`);
+            // Note: Automatic reconnection can be added here if needed
         };
 
         return () => ws.close();

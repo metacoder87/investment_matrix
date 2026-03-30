@@ -28,6 +28,7 @@ class RedisPublisher:
         price: float,
         amount: float,
         side: str | None,
+        trade_id: str | None = None,
         recv_ts: float | None = None,
         extra: dict[str, Any] | None = None,
     ) -> None:
@@ -44,6 +45,8 @@ class RedisPublisher:
             "amount": float(amount),
             "side": (side or "").lower() or None,
         }
+        if trade_id is not None:
+            payload["trade_id"] = trade_id
         if extra:
             payload["extra"] = extra
 
@@ -75,10 +78,11 @@ class RedisPublisher:
             "amount": str(amount),
             "side": str((side or "").lower()),
         }
+        if trade_id is not None:
+            stream_fields["trade_id"] = str(trade_id)
         await self._redis.xadd(
             self._stream_key,
             stream_fields,
             maxlen=self._stream_maxlen,
             approximate=True,
         )
-

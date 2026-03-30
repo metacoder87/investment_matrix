@@ -54,7 +54,14 @@ class BaseTradeStreamer(ABC):
         """Parse the raw message and publish trades if present."""
         pass
 
+    async def subscribe(self, symbols: list[str]) -> None:
+        """Queue a subscription request for new symbols."""
+        if not self._write_queue:
+            return
+        await self._write_queue.put({"type": "subscribe", "symbols": symbols})
+
     async def run_forever(self, publisher: RedisPublisher) -> None:
+        self._write_queue = asyncio.Queue()
         backoff_seconds = 1.0
         
         while True:
@@ -67,41 +74,58 @@ class BaseTradeStreamer(ABC):
                     close_timeout=10,
                     max_queue=self.max_queue,
                 ) as ws:
-                    # Reset backoff on successful connection
                     backoff_seconds = 1.0
                     
-                    # Subscribe
+                    # Initial Subscription
                     sub_msg = self.get_subscription_message()
                     await ws.send(json.dumps(sub_msg, separators=(",", ":")))
-                    self.logger.info(f"Subscribed to {len(self.symbols)} symbols")
+                    self.logger.info(f"Subscribed to initial symbols")
 
-                    async for raw in ws:
+                    # Run Read and Write loops concurrently
+                    read_task = asyncio.create_task(self._read_loop(ws, publisher))
+                    write_task = asyncio.create_task(self._write_loop(ws))
+                    
+                    done, pending = await asyncio.wait(
+                        [read_task, write_task], 
+                        return_when=asyncio.FIRST_COMPLETED
+                    )
+                    
+                    # If one fails, cancel the other and reconnect
+                    for task in pending:
+                        task.cancel()
+                    for task in done:
                         try:
-                            msg = json.loads(raw)
-                        except json.JSONDecodeError:
-                            continue
-                        
-                        await self.process_message(msg, publisher)
+                            task.result()
+                        except Exception as e:
+                            self.logger.error(f"Task failed: {e}")
+                            raise e # Trigger outer reconnection
 
             except asyncio.CancelledError:
                 self.logger.info("Stopping streamer...")
                 raise
-            except websockets.exceptions.InvalidStatus as e:
-                # Special handling for HTTP errors (like 429 or 403)
-                self.logger.error(f"WebSocket status error: {e}")
-                if e.response.status_code == 429:
-                    # Rate limit; back off aggressively
-                    backoff_seconds = max(backoff_seconds * 2, 60.0)
-                elif e.response.status_code == 451:
-                    # Legal/Geofence block
-                    self.logger.critical("Geoblocked (HTTP 451). Stopping reconnection loop.")
-                    # Sleep forever or a very long time to prevent loop spam
-                    await asyncio.sleep(3600)
-                    continue
-                else:
-                    await asyncio.sleep(backoff_seconds)
-                    backoff_seconds = min(backoff_seconds * 2.0, 30.0)
             except Exception as e:
                 self.logger.exception(f"Connection lost: {e}; retrying in {backoff_seconds:.1f}s")
                 await asyncio.sleep(backoff_seconds)
                 backoff_seconds = min(backoff_seconds * 2.0, 30.0)
+
+    async def _read_loop(self, ws, publisher):
+        async for raw in ws:
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            await self.process_message(msg, publisher)
+
+    async def _write_loop(self, ws):
+        while True:
+            msg = await self._write_queue.get()
+            if msg["type"] == "subscribe":
+                payload = self._make_subscription_payload(msg["symbols"])
+                if payload:
+                    await ws.send(json.dumps(payload))
+                    self.logger.info(f"Dynamically subscribed to {msg['symbols']}")
+
+    def _make_subscription_payload(self, symbols: list[str]) -> dict | None:
+        """Override this in subclasses to format dynamic subscription."""
+        # Default behavior: generic
+        return None

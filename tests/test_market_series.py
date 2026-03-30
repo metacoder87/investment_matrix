@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from app.models.market import MarketTrade
+from app.models.ticks import Asset, Tick
 
 
 def test_market_series_bucketed(client, db_session):
@@ -60,3 +61,50 @@ def test_market_series_bucketed(client, db_session):
     assert point["trades"] == 2
     assert abs(point["price"] - 100.5) < 1e-9
 
+
+def test_market_series_from_ticks(client, db_session):
+    start = datetime(2025, 3, 1, 0, 0, 0, tzinfo=timezone.utc)
+    end = start + timedelta(seconds=10)
+
+    asset = Asset(symbol="ADA-USD", exchange="coinbase", base="ADA", quote="USD", active=True)
+    db_session.add(asset)
+    db_session.flush()
+
+    db_session.add_all(
+        [
+            Tick(
+                asset_id=asset.id,
+                time=start + timedelta(seconds=1),
+                price=1.0,
+                volume=100.0,
+                side="buy",
+            ),
+            Tick(
+                asset_id=asset.id,
+                time=start + timedelta(seconds=1, milliseconds=500),
+                price=1.2,
+                volume=200.0,
+                side="sell",
+            ),
+            Tick(
+                asset_id=asset.id,
+                time=start + timedelta(seconds=7),
+                price=1.5,
+                volume=150.0,
+                side="buy",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    resp = client.get(
+        "/api/market/series/coinbase/ADA-USD",
+        params={"start": start.isoformat(), "end": end.isoformat(), "max_points": 100},
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    points = payload["points"]
+    bucket_1s = (start + timedelta(seconds=1)).isoformat()
+    point = next(p for p in points if p["timestamp"] == bucket_1s)
+    assert point["trades"] == 2
+    assert abs(point["price"] - 1.1) < 1e-9

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { TrendingUp, TrendingDown, Minus, AlertTriangle, Target, ShieldAlert } from "lucide-react";
+import { getApiBaseUrl } from "@/utils/api";
 
 interface SignalData {
     symbol: string;
@@ -33,7 +34,7 @@ export default function SignalCard({ symbol, onSignalLoad }: SignalCardProps) {
             setLoading(true);
             setError(null);
             try {
-                const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+                const baseUrl = getApiBaseUrl();
                 const response = await fetch(`${baseUrl}/signals/${normalizedSymbol}`);
 
                 if (!response.ok) {

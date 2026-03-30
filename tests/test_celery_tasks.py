@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from celery_worker.tasks import backfill_core_universe, ingest_historical_data
 
@@ -20,14 +21,21 @@ def test_backfill_core_universe(mock_session_scope, mock_celery_app, mock_subtas
     assert "queued" in result["status"]
 
 @patch("celery_worker.tasks.backfill_historical_candles")
-def test_backfill_core_universe_logic(mock_task):
+@patch("celery_worker.tasks.session_scope")
+def test_backfill_core_universe_logic(mock_session_scope, mock_task):
     """Test that backfill_core_universe calls the sub-task."""
+    mock_db = MagicMock()
+    mock_db.query.return_value.order_by.return_value.limit.return_value.all.return_value = [
+        SimpleNamespace(symbol=symbol)
+        for symbol in ["BTC", "ETH", "SOL", "XRP", "ADA"]
+    ]
+    mock_session_scope.return_value.__enter__.return_value = mock_db
     mock_task.delay.return_value.id = "mock_id"
     
     result = backfill_core_universe(exchange_id="coinbase", days=7)
     
     assert result["status"] == "queued"
-    assert len(result["tasks"]) == 5 # Default 5 symbols
+    assert len(result["tasks_sample"]) == 5 # Default 5 symbols
     assert mock_task.delay.call_count == 5
 
 def test_ingest_historical_data_mock():

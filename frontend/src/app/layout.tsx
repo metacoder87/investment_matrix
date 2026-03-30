@@ -4,6 +4,7 @@ import "./globals.css";
 import clsx from "clsx";
 import { Sidebar } from "@/components/Sidebar";
 import { Header } from "@/components/Header";
+import { AuthProvider } from "@/context/AuthContext";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
@@ -24,11 +25,13 @@ export default function RootLayout({
         <html lang="en">
             <body className={clsx(inter.variable, "font-sans antialiased")}>
                 <div className="flex min-h-screen bg-background text-white">
-                    <Sidebar />
-                    <div className="flex flex-1 flex-col transition-all md:ml-64">
-                        <Header />
-                        <main className="flex-1">{children}</main>
-                    </div>
+                    <AuthProvider>
+                        <Sidebar />
+                        <div className="flex flex-1 flex-col transition-all md:ml-64">
+                            <Header />
+                            <main className="flex-1">{children}</main>
+                        </div>
+                    </AuthProvider>
                 </div>
             </body>
         </html>

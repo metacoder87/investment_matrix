@@ -180,7 +180,7 @@ export default function MarketPage({ params }: MarketPageProps) {
                 </div>
 
                 {/* Candlestick Chart Component */}
-                <CandlestickChart symbol={symbol} exchange="coinbase" />
+                <CandlestickChart symbol={symbol} exchange="auto" />
             </div>
 
             {/* Technical Indicators */}

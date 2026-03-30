@@ -1,10 +1,8 @@
-from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
-from starlette.concurrency import run_in_threadpool
 
 from database import get_db
 from app.models.portfolio import Portfolio, Order, Holding, OrderSide, OrderStatus
@@ -72,11 +70,12 @@ def list_portfolios(db: Session = Depends(get_db)):
 
 @router.get("/{id}", response_model=PortfolioSummary)
 async def get_portfolio(id: int, db: Session = Depends(get_db)):
-    # Run blocking DB query in threadpool
-    def _get_pf():
-        return db.query(Portfolio).options(joinedload(Portfolio.holdings)).filter(Portfolio.id == id).first()
-    
-    pf = await run_in_threadpool(_get_pf)
+    pf = (
+        db.query(Portfolio)
+        .options(joinedload(Portfolio.holdings))
+        .filter(Portfolio.id == id)
+        .first()
+    )
     
     if not pf:
         raise HTTPException(404, "Portfolio not found")
@@ -94,7 +93,10 @@ async def get_portfolio(id: int, db: Session = Depends(get_db)):
         # Ideally we'd use h.exchange, but let's stick to simple efficient latest:{symbol}
         # or specific if recorded. For simplicity, just use latest:{symbol} as primary cache.
         
-        raw_values = await redis_client.mget(keys)
+        try:
+            raw_values = await redis_client.mget(keys)
+        except Exception:
+            raw_values = [None] * len(keys)
         price_map = {}
         for sym, raw in zip(symbols, raw_values):
             if raw:
@@ -162,7 +164,8 @@ def create_order(id: int, order: OrderCreate, db: Session = Depends(get_db)):
     # Update Holding
     holding = db.query(Holding).filter(
         Holding.portfolio_id == id, 
-        Holding.symbol == new_order.symbol
+        Holding.symbol == new_order.symbol,
+        Holding.exchange == new_order.exchange
     ).first()
     
     if not holding:
@@ -171,6 +174,7 @@ def create_order(id: int, order: OrderCreate, db: Session = Depends(get_db)):
         holding = Holding(
             portfolio_id=id,
             symbol=new_order.symbol,
+            exchange=new_order.exchange,
             quantity=0.0,
             avg_entry_price=0.0
         )

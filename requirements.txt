@@ -19,17 +19,20 @@ scikit-learn
 scipy
 
 # Frontend
-solara
-plotly
-plotly-resampler
-anywidget
+
 
 # Security
 cryptography
 keyring
+passlib[argon2]
+python-jose[cryptography]
+python-multipart
+email-validator
+argon2-cffi
 
 # For testing
 pytest
+pytest-asyncio
 httpx
 
 # Lint (CI)

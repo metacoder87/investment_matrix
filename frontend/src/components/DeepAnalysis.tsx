@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Activity, Brain, TrendingUp, AlertTriangle } from "lucide-react";
+import { getApiBaseUrl } from "@/utils/api";
 
 interface QuantMetrics {
     annualized_volatility: number;
@@ -53,18 +54,19 @@ export default function DeepAnalysis({ symbol }: DeepAnalysisProps) {
             setLoading(true);
             try {
                 // Fetch Quant
-                const quantRes = await fetch(`http://localhost:8000/api/coin/${symbol}/quant`);
+                const baseUrl = getApiBaseUrl();
+                const quantRes = await fetch(`${baseUrl}/coin/${symbol}/quant`);
                 if (quantRes.ok) {
                     const json = await quantRes.json();
                     setQuant(json.data ? { ...json.data, calculated_at: json.calculated_at } : json);
                 }
 
                 // Fetch Fundamentals (using base symbol)
-                const fundRes = await fetch(`http://localhost:8000/api/coin/${baseSymbol}/fundamentals`);
+                const fundRes = await fetch(`${baseUrl}/coin/${baseSymbol}/fundamentals`);
                 if (fundRes.ok) setFund(await fundRes.json());
 
                 // Fetch Sentiment
-                const sentRes = await fetch(`http://localhost:8000/api/coin/${baseSymbol}/sentiment`);
+                const sentRes = await fetch(`${baseUrl}/coin/${baseSymbol}/sentiment`);
                 if (sentRes.ok) setSentiment(await sentRes.json());
 
             } catch (e) {
@@ -103,7 +105,7 @@ export default function DeepAnalysis({ symbol }: DeepAnalysisProps) {
                     <div className="space-y-4">
                         <div className="flex justify-between">
                             <span className="text-gray-400">Volatility (Ann.)</span>
-                            <span className="font-mono text-white">{(quant?.annualized_volatility ?? 0 * 100).toFixed(2)}%</span>
+                            <span className="font-mono text-white">{((quant?.annualized_volatility ?? 0) * 100).toFixed(2)}%</span>
                         </div>
                         <div className="flex justify-between">
                             <span className="text-gray-400">Sharpe Ratio</span>

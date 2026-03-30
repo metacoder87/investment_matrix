@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { createChart, ColorType, ISeriesApi, Time } from "lightweight-charts";
+import { createChart, ColorType, ISeriesApi, Time, AreaSeries } from "lightweight-charts";
 
 interface ChartPoint {
     time: string; // ISO string
@@ -59,7 +59,7 @@ export default function MarketChart({ data, color = "#22d3ee" }: MarketChartProp
             },
         });
 
-        const areaSeries = chart.addAreaSeries({
+        const areaSeries = chart.addSeries(AreaSeries, {
             lineColor: chartColor,
             topColor: isPositive ? "rgba(34, 211, 238, 0.4)" : "rgba(244, 114, 182, 0.4)",
             bottomColor: isPositive ? "rgba(34, 211, 238, 0.0)" : "rgba(244, 114, 182, 0.0)",

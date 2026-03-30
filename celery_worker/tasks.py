@@ -2,15 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import ccxt.async_support as ccxt
 
 from app.connectors.fundamental import CoinGeckoConnector
 from app.models.instrument import Coin, Price
+from app.models.paper import PaperAccount, PaperSchedule
 from celery_app import celery_app
 from database import session_scope
+from app.services.imports.download import (
+    binance_vision_daily_url,
+    build_download_spec,
+    date_range,
+    download_file,
+    dukascopy_hourly_url,
+)
+from app.services.imports.ingest import ingest_ticks
+from app.services.imports.registry import get_importer
+from app.services.paper_trading import PaperStepPayload, execute_paper_step
 
 logger = logging.getLogger("cryptoinsight.tasks")
 
@@ -18,6 +29,9 @@ logger = logging.getLogger("cryptoinsight.tasks")
 def _normalize_symbol(symbol: str, exchange_id: str) -> str:
     """Normalize symbol format for different exchanges."""
     symbol = symbol.strip().upper()
+    # Strip exchange prefix if present (e.g. COINBASE:BTC-USD -> BTC-USD)
+    if ":" in symbol:
+        _, symbol = symbol.split(":", 1)
     # Convert dash format to slash for CCXT
     if "-" in symbol and "/" not in symbol:
         base, quote = symbol.split("-", 1)
@@ -26,6 +40,33 @@ def _normalize_symbol(symbol: str, exchange_id: str) -> str:
     if exchange_id == "binance" and symbol.endswith("/USD"):
         symbol = symbol[:-3] + "USDT"
     return symbol
+
+
+
+
+def _normalize_symbol_db(symbol: str, exchange_id: str) -> str:
+    symbol_ccxt = _normalize_symbol(symbol, exchange_id)
+    return symbol_ccxt.replace("/", "-").upper()
+
+
+def _normalize_dukascopy_symbol(symbol: str) -> str:
+    raw = symbol.strip().upper()
+    if "/" in raw or "-" in raw:
+        return raw.replace("/", "-")
+    for quote in ("USDT", "USDC", "USD", "BTC", "ETH", "EUR"):
+        if raw.endswith(quote) and len(raw) > len(quote):
+            base = raw[: -len(quote)]
+            return f"{base}-{quote}"
+    return raw
+
+
+def _parse_coingecko_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 @celery_app.task
@@ -38,10 +79,12 @@ def ingest_historical_data(
     """
     Ingests historical price data for a given symbol (basic version).
     """
-    symbol = _normalize_symbol(symbol, exchange_id)
+    exchange_key = exchange_id.strip().lower()
+    symbol_ccxt = _normalize_symbol(symbol, exchange_key)
+    symbol_db = _normalize_symbol_db(symbol, exchange_key)
     
     async def fetch():
-        exchange_cls = getattr(ccxt, exchange_id, None)
+        exchange_cls = getattr(ccxt, exchange_key, None)
         if exchange_cls is None:
             raise ValueError(f"Unknown exchange_id={exchange_id!r} (must be a CCXT exchange id)")
         exchange = exchange_cls({"enableRateLimit": True})
@@ -49,7 +92,7 @@ def ingest_historical_data(
             timeframe_seconds = exchange.parse_timeframe(timeframe)
             since = exchange.milliseconds() - limit * timeframe_seconds * 1000
             return await exchange.fetch_ohlcv(
-                symbol,
+                symbol_ccxt,
                 timeframe=timeframe,
                 since=since,
                 limit=limit,
@@ -63,7 +106,8 @@ def ingest_historical_data(
         for row in ohlcv:
             ts = datetime.fromtimestamp(row[0] / 1000, tz=timezone.utc)
             price = Price(
-                symbol=symbol,
+                symbol=symbol_db,
+                exchange=exchange_key,
                 timestamp=ts,
                 open=row[1],
                 high=row[2],
@@ -72,7 +116,7 @@ def ingest_historical_data(
                 volume=row[5],
             )
             db.add(price)
-    return f"Successfully ingested {len(ohlcv)} data points for {symbol}"
+    return f"Successfully ingested {len(ohlcv)} data points for {symbol_db}"
 
 
 @celery_app.task(bind=True)
@@ -97,11 +141,12 @@ def backfill_historical_candles(
         days: Number of days to backfill (default: 7)
         start_from: Optional ISO timestamp to start from (for resuming)
     """
-    symbol_ccxt = _normalize_symbol(symbol, exchange_id)
-    symbol_db = symbol.strip().upper().replace("/", "-")
+    exchange_key = exchange_id.strip().lower()
+    symbol_ccxt = _normalize_symbol(symbol, exchange_key)
+    symbol_db = _normalize_symbol_db(symbol, exchange_key)
     
     async def fetch_all():
-        exchange_cls = getattr(ccxt, exchange_id, None)
+        exchange_cls = getattr(ccxt, exchange_key, None)
         if exchange_cls is None:
             raise ValueError(f"Unknown exchange_id={exchange_id!r}")
         
@@ -175,6 +220,7 @@ def backfill_historical_candles(
             
             # Check for existing record
             existing = db.query(Price).filter(
+                Price.exchange == exchange_key,
                 Price.symbol == symbol_db,
                 Price.timestamp == ts
             ).first()
@@ -185,6 +231,7 @@ def backfill_historical_candles(
             
             price = Price(
                 symbol=symbol_db,
+                exchange=exchange_key,
                 timestamp=ts,
                 open=row[1],
                 high=row[2],
@@ -198,7 +245,7 @@ def backfill_historical_candles(
     result = {
         "status": "success",
         "symbol": symbol_db,
-        "exchange": exchange_id,
+        "exchange": exchange_key,
         "timeframe": timeframe,
         "days": days,
         "total_fetched": len(candles),
@@ -218,12 +265,24 @@ def backfill_core_universe(
     """
     Backfill historical data for the core universe of trading pairs.
     
-    This is typically called on startup to ensure charts have historical data.
-    Uses Coinbase Pro by default as it's accessible in the US (unlike Binance.com).
+    Dynamic: Automatically selects the Top N coins by market cap from the DB.
     """
+    from app.config import settings
+
     if symbols is None:
-        # Default core universe - use USD pairs for Coinbase
-        symbols = ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "ADA/USD"]
+        with session_scope() as db:
+            top_coins = (
+                db.query(Coin.symbol)
+                .order_by(Coin.market_cap_rank.asc())
+                .limit(settings.TRACK_TOP_N_COINS)
+                .all()
+            )
+            if top_coins:
+                symbols = [f"{c.symbol.strip().upper()}-USD" for c in top_coins]
+            else:
+                symbols = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "ADA-USD"]
+    
+    logger.info(f"Triggering core backfill for {len(symbols)} symbols")
     
     results = []
     for symbol in symbols:
@@ -237,7 +296,7 @@ def backfill_core_universe(
         except Exception as e:
             results.append({"symbol": symbol, "error": str(e)})
     
-    return {"status": "queued", "tasks": results}
+    return {"status": "queued", "count": len(results), "tasks_sample": results[:5]}
 
 
 @celery_app.task
@@ -250,7 +309,8 @@ def detect_and_fill_gaps(
     """
     Detect gaps in stored price data and backfill them.
     """
-    symbol_db = symbol.strip().upper().replace("/", "-")
+    exchange_key = exchange_id.strip().lower()
+    symbol_db = _normalize_symbol_db(symbol, exchange_key)
     timeframe_minutes = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440}.get(timeframe, 1)
     
     gaps_found = []
@@ -258,6 +318,7 @@ def detect_and_fill_gaps(
     with session_scope() as db:
         # Get all timestamps for this symbol, ordered
         prices = db.query(Price.timestamp).filter(
+            Price.exchange == exchange_key,
             Price.symbol == symbol_db
         ).order_by(Price.timestamp.asc()).all()
         
@@ -312,6 +373,9 @@ def fetch_and_store_coin_list():
         if not batch:
             break
         all_coins.extend(batch)
+        # If we received fewer items than requested, we've reached the end (or are using steady fallback)
+        if len(batch) < per_page:
+            break
 
     with session_scope() as db:
         for coin_data in all_coins:
@@ -320,7 +384,11 @@ def fetch_and_store_coin_list():
                 symbol=coin_data.get("symbol"),
                 name=coin_data.get("name"),
                 market_cap_rank=coin_data.get("market_cap_rank"),
+                market_cap=coin_data.get("market_cap"),
+                current_price=coin_data.get("current_price"),
+                price_change_percentage_24h=coin_data.get("price_change_percentage_24h"),
                 image=coin_data.get("image"),
+                last_updated=_parse_coingecko_timestamp(coin_data.get("last_updated")),
             )
             db.merge(coin)
 
@@ -332,6 +400,254 @@ def fetch_and_store_news(query: str = 'crypto'):
     """
     Fetches and stores news for a given query.
     """
-    # Optional plugin: deliberately not implemented in the zero-cost core.
-    return f"News ingestion is disabled in the zero-cost core (query={query!r})."
+    from app.connectors.news import News
+    
+    logger.info(f"Starting news ingestion for query: {query}")
+    
+    try:
+        news_connector = News()
+        results = news_connector.get_news(query)
+        
+        # Summary of results
+        summary = {source: len(articles) if articles else 0 for source, articles in results.items()}
+        logger.info(f"News ingestion complete. Results: {summary}")
+        
+        # NOTE: Since no 'News' table exists in DB, we currently just log the availability.
+        # This confirms API keys are working and connectors are active.
+        # Future improvement: Save 'results' to Redis or a new 'News' table.
+        
+        return f"News ingestion successful: {summary}"
+    except Exception as e:
+        logger.error(f"News ingestion failed: {e}")
+        return f"News ingestion failed: {e}"
+
+
+@celery_app.task(bind=True)
+def import_binance_vision_range(
+    self,
+    symbol: str,
+    exchange: str = "binance",
+    kind: str = "trades",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    owner_id: str | None = None,
+):
+    """
+    Import Binance Vision trades/aggTrades for a date range (daily ZIPs).
+    """
+    kind = kind.strip()
+    if kind.lower() in {"agg_trades", "aggtrades"}:
+        kind = "aggTrades"
+    start = date.fromisoformat(start_date) if start_date else date.today()
+    end = date.fromisoformat(end_date) if end_date else start
+    days = date_range(start, end)
+
+    imported = 0
+    total_days = max(1, len(days))
+    registry_kind = "agg_trades" if kind == "aggTrades" else "trades"
+    for idx, day in enumerate(days):
+        url = binance_vision_daily_url(symbol, day, kind)
+        filename = f"{symbol.replace('-', '').upper()}-{kind}-{day.isoformat()}.zip"
+        spec = build_download_spec(url, filename)
+        try:
+            path = download_file(spec)
+            importer = get_importer(f"binance_vision_{registry_kind}", path=path, symbol=symbol, exchange=exchange)
+            with session_scope() as db:
+                imported += ingest_ticks(
+                    db,
+                    importer=importer,
+                    source="binance_vision",
+                    kind=kind,
+                    source_key=spec.source_key,
+                    owner_id=owner_id,
+                    ingest_source="binance_vision",
+                )
+        except FileNotFoundError:
+            logger.warning("Binance Vision file not found: %s", url)
+        except Exception as exc:
+            logger.exception("Binance Vision import failed: %s", exc)
+            raise
+
+        progress = int(((idx + 1) / total_days) * 100)
+        self.update_state(state="PROGRESS", meta={"progress": progress, "days": len(days)})
+
+    return {"status": "success", "imported": imported, "days": len(days)}
+
+
+@celery_app.task
+def import_binance_vision_yesterday(
+    symbol: str,
+    exchange: str = "binance",
+    kind: str = "trades",
+    owner_id: str | None = None,
+):
+    day = (date.today() - timedelta(days=1)).isoformat()
+    return import_binance_vision_range(
+        symbol=symbol,
+        exchange=exchange,
+        kind=kind,
+        start_date=day,
+        end_date=day,
+        owner_id=owner_id,
+    )
+
+
+@celery_app.task(bind=True)
+def import_dukascopy_range(
+    self,
+    symbol: str,
+    exchange: str = "dukascopy",
+    start_datetime: str | None = None,
+    end_datetime: str | None = None,
+    owner_id: str | None = None,
+    price_scale: int = 100_000,
+    volume_scale: int = 100_000,
+):
+    """
+    Import Dukascopy BI5 hourly ticks for a datetime range.
+    """
+    if start_datetime is None or end_datetime is None:
+        raise ValueError("start_datetime and end_datetime are required (ISO 8601)")
+    start = datetime.fromisoformat(start_datetime.replace("Z", "+00:00"))
+    end = datetime.fromisoformat(end_datetime.replace("Z", "+00:00"))
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    if start > end:
+        raise ValueError("start_datetime must be <= end_datetime")
+
+    symbol = _normalize_dukascopy_symbol(symbol)
+    if "-" not in symbol:
+        raise ValueError("symbol must be BASE-QUOTE (e.g. BTC-USD) or include a known quote suffix")
+
+    imported = 0
+    total_hours = int(((end - start).total_seconds() // 3600) + 1)
+    current = start
+    processed = 0
+
+    while current <= end:
+        url = dukascopy_hourly_url(symbol, current)
+        filename = f"{symbol.upper()}_{current:%Y%m%d_%H}h_ticks.bi5"
+        spec = build_download_spec(url, filename)
+        try:
+            path = download_file(spec)
+            importer = get_importer(
+                "dukascopy_bi5",
+                path=path,
+                symbol=symbol,
+                exchange=exchange,
+                base_time=current,
+                price_scale=price_scale,
+                volume_scale=volume_scale,
+            )
+
+            with session_scope() as db:
+                imported += ingest_ticks(
+                    db,
+                    importer=importer,
+                    source="dukascopy",
+                    kind="bi5",
+                    source_key=spec.source_key,
+                    owner_id=owner_id,
+                    ingest_source="dukascopy",
+                )
+        except FileNotFoundError:
+            logger.warning("Dukascopy file not found: %s", url)
+        except Exception as exc:
+            logger.exception("Dukascopy import failed: %s", exc)
+            raise
+
+        processed += 1
+        progress = int((processed / max(1, total_hours)) * 100)
+        self.update_state(state="PROGRESS", meta={"progress": progress, "hours": total_hours})
+        current += timedelta(hours=1)
+
+    return {"status": "success", "imported": imported, "hours": total_hours}
+
+
+def _schedule_due(schedule: PaperSchedule, now: datetime) -> bool:
+    if schedule.last_run_at is None:
+        return True
+    elapsed = (now - schedule.last_run_at).total_seconds()
+    return elapsed >= max(1, schedule.interval_seconds or 0)
+
+
+def _apply_drawdown_guardrail(account: PaperAccount, schedule: PaperSchedule) -> bool:
+    if schedule.max_drawdown_pct is None:
+        return False
+    if not account.equity_peak or not account.last_equity:
+        return False
+    if account.equity_peak <= 0:
+        return False
+    drawdown_pct = (1 - (account.last_equity / account.equity_peak)) * 100
+    if drawdown_pct >= schedule.max_drawdown_pct:
+        schedule.is_active = False
+        schedule.disabled_reason = f"max_drawdown {drawdown_pct:.2f}%"
+        return True
+    return False
+
+
+@celery_app.task
+def tick_paper_schedules():
+    now = datetime.now(timezone.utc)
+    ran = 0
+    skipped = 0
+
+    with session_scope() as db:
+        schedules = (
+            db.query(PaperSchedule)
+            .filter(PaperSchedule.is_active.is_(True))
+            .all()
+        )
+
+        for schedule in schedules:
+            if not _schedule_due(schedule, now):
+                skipped += 1
+                continue
+
+            account = (
+                db.query(PaperAccount)
+                .filter(PaperAccount.id == schedule.account_id)
+                .first()
+            )
+            if not account:
+                schedule.is_active = False
+                schedule.disabled_reason = "missing_account"
+                continue
+
+            result = execute_paper_step(
+                db=db,
+                account=account,
+                payload=PaperStepPayload(
+                    symbol=schedule.symbol,
+                    exchange=schedule.exchange,
+                    timeframe=schedule.timeframe,
+                    lookback=schedule.lookback,
+                    as_of=None,
+                    source=schedule.source,
+                    strategy=schedule.strategy,
+                    strategy_params=schedule.strategy_params or {},
+                ),
+                commit=False,
+            )
+
+            if result.get("status") == "no_data":
+                skipped += 1
+                continue
+
+            schedule.last_run_at = now
+            _apply_drawdown_guardrail(account, schedule)
+            ran += 1
+
+    return {"status": "ok", "ran": ran, "skipped": skipped}
+
+
+
+
+
+
+
+
+
 

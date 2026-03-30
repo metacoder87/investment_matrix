@@ -1,12 +1,13 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { getApiBaseUrl } from "@/utils/api";
 
 export default function SettingsPage() {
     const [apiUrl, setApiUrl] = useState("");
 
     useEffect(() => {
-        setApiUrl(process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api");
+        setApiUrl(getApiBaseUrl());
     }, []);
 
     return (

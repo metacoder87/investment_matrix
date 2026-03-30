@@ -6,12 +6,6 @@ class NewsConnector:
     A connector for fetching news and social media sentiment from various sources.
     """
 
-    def __init__(self):
-        """
-        Initializes the clients for NewsAPI.
-        """
-        pass
-
     def get_crypto_news(self, query: str = 'crypto', language: str = 'en', sort_by: str = 'relevancy', page_size: int = 20):
         """
         Fetches top headlines for a given query from NewsAPI.

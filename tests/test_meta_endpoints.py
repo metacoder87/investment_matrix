@@ -21,8 +21,11 @@ def test_get_latest_tick_for_exchange(client):
         "amount": 0.1,
         "side": "buy",
     }
-    with patch("app.main.redis_client.get", new=AsyncMock(return_value=json.dumps(payload))):
+    mock_get = AsyncMock(return_value=json.dumps(payload))
+    with patch("app.main.redis_client.get", new=mock_get):
         response = client.get("/api/market/latest/coinbase/BTC-USD")
     assert response.status_code == 200
     assert response.json()["exchange"] == "coinbase"
+    mock_get.assert_awaited_once_with("latest:coinbase:BTC-USD")
+
 

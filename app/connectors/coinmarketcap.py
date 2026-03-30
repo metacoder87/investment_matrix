@@ -75,3 +75,9 @@ class CoinMarketCapConnector:
         except requests.exceptions.RequestException as e:
             return {"status": "error", "reason": str(e)}
 
+    def get_news(self, slug: str):
+        """
+        CMC news is not available on the free tier.
+        Return a disabled payload for graceful degradation.
+        """
+        return {"status": "disabled", "reason": "CMC news not available on free tier", "articles": []}
