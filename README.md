@@ -181,14 +181,14 @@ npm run dev
 *   [x] Next.js Dashboard with live ticking charts.
 
 ### Phase 2: Intelligence & Analysis
-*   [ ] Integration of `TA-Lib` for server-side indicator calculation.
+*   [x] Integration of `pandas-ta` for server-side indicator calculation.
 *   [ ] Machine Learning pipeline (ARIMA/LSTM) for price prediction.
-*   [ ] Sentiment analysis engine for crypto news feeds.
+*   [x] Sentiment analysis engine for crypto news feeds.
 
 ### Phase 3: Execution
-*   [ ] Paper trading engine integration (Alpaca/CCXT).
+*   [x] Paper trading engine integration (Alpaca/CCXT).
 *   [ ] Reinforcement Learning (RL) agent environment.
-*   [ ] Automated strategy backtesting implementation.
+*   [x] Automated strategy backtesting implementation.
 
 ---
 
