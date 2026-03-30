@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.analysis import add_technical_indicators
 from app.analysis_quant import calculate_risk_metrics
 from app.config import settings
+from app.services.backfill import StartupGapFiller, bootstrap_universe
 from app.services.price_selection import resolve_price_exchange
 from app.connectors.fundamental import CoinGeckoConnector
 from app.connectors.sentiment import Sentiment
@@ -32,7 +33,10 @@ from app.models.ticks import Asset, Tick
 from celery_app import celery_app
 from app.signals.engine import SignalEngine
 from app.services.data_quality import detect_gaps_data
-from database import get_db, init_db, session_scope
+from database import get_db, init_db
+
+
+logger = logging.getLogger("cryptoinsight.main")
 
 
 def get_coingecko_connector() -> CoinGeckoConnector:
@@ -53,13 +57,9 @@ def get_fmp_connector() -> FinancialModelingPrepConnector:
 def get_newsdata_connector() -> NewsDataIoConnector:
     return NewsDataIoConnector()
 
-
-from app.services.backfill import StartupGapFiller, bootstrap_universe
-
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        logger = logging.getLogger("cryptoinsight.main")
         logger.info("🚀 CryptoInsight starting up...")
         
         # Initialize database
@@ -1931,7 +1931,7 @@ def create_app() -> FastAPI:
         if cached_result:
              try:
                  return json.loads(cached_result)
-             except:
+             except (TypeError, ValueError, json.JSONDecodeError):
                  pass
 
         # 3. Compute (Cache Miss)
@@ -2024,7 +2024,7 @@ def create_app() -> FastAPI:
         if cached_result:
              try:
                  return json.loads(cached_result)
-             except:
+             except (TypeError, ValueError, json.JSONDecodeError):
                  pass
                  
         # 3. Compute (Cache Miss)
@@ -2242,7 +2242,7 @@ def create_app() -> FastAPI:
         if cached:
             try:
                 return json.loads(cached)
-            except:
+            except (TypeError, ValueError, json.JSONDecodeError):
                 pass
 
         symbol_list = [s.strip().upper().replace("/", "-") for s in symbols.split(",") if s.strip()]
@@ -2308,7 +2308,7 @@ def create_app() -> FastAPI:
         if cached:
             try:
                 return json.loads(cached)
-            except:
+            except (TypeError, ValueError, json.JSONDecodeError):
                 pass
 
         # 3. Compute (Cache Miss)

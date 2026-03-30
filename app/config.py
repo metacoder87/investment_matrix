@@ -79,8 +79,14 @@ class Settings(BaseSettings):
     )
 
     # Security
-    SECRET_KEY: str = Field(description="JWT Secret Key - REQUIRED. Generate with: python -c 'import secrets; print(secrets.token_urlsafe(32))'")
-    ENCRYPTION_KEY: str = Field(description="Fernet Key (base64) - REQUIRED. Generate with: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'")
+    SECRET_KEY: str = Field(
+        default="",
+        description="JWT secret. Leave blank only for local/CI dev fallback behavior.",
+    )
+    ENCRYPTION_KEY: str = Field(
+        default="",
+        description="Fernet key. Leave blank only for local/CI dev fallback behavior.",
+    )
     
     # CORS Configuration
     ALLOWED_ORIGINS: str = Field(
