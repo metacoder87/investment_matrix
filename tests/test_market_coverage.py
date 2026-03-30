@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from app.models.market import MarketTrade
+from app.models.ticks import Asset, Tick
 
 
 def test_market_coverage_empty(client):
@@ -47,3 +48,34 @@ def test_market_coverage_counts_and_range(client, db_session):
     assert payload["trades"] == 2
     assert payload["first_timestamp"] < payload["last_timestamp"]
 
+
+def test_market_coverage_prefers_ticks(client, db_session):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    asset = Asset(symbol="SOL-USD", exchange="coinbase", base="SOL", quote="USD", active=True)
+    db_session.add(asset)
+    db_session.flush()
+    db_session.add_all(
+        [
+            Tick(
+                asset_id=asset.id,
+                time=now - timedelta(seconds=3),
+                price=50.0,
+                volume=0.1,
+                side="buy",
+            ),
+            Tick(
+                asset_id=asset.id,
+                time=now - timedelta(seconds=1),
+                price=51.0,
+                volume=0.2,
+                side="sell",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    resp = client.get("/api/market/coverage/coinbase/SOL-USD")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["trades"] == 2
+    assert payload["source"] == "ticks"
