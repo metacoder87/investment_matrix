@@ -1,3 +1,17 @@
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql+psycopg2://user:pass@db:5432/cryptoinsight
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/0
+  SECRET_KEY: ""
+  ENCRYPTION_KEY: ""
+  AUTO_IMPORT_ENABLED: "false"
+  PAPER_SCHEDULER_ENABLED: "false"
+  CORE_UNIVERSE: "BTC-USD"
+  STREAM_EXCHANGE: "COINBASE"
+  STREAM_EXCHANGES: ""
+  STREAM_MAX_SYMBOLS_PER_EXCHANGE: "1"
+  TRACK_TOP_N_COINS: "5"
+
 services:
   redis:
     healthcheck:
@@ -6,15 +20,13 @@ services:
       timeout: 5s
       retries: 20
 
+  migrate:
+    environment:
+      <<: *backend-env
+
   api:
     environment:
-      AUTO_IMPORT_ENABLED: "false"
-      PAPER_SCHEDULER_ENABLED: "false"
-      CORE_UNIVERSE: "BTC-USD"
-      STREAM_EXCHANGE: "COINBASE"
-      STREAM_EXCHANGES: ""
-      STREAM_MAX_SYMBOLS_PER_EXCHANGE: "1"
-      TRACK_TOP_N_COINS: "5"
+      <<: *backend-env
     healthcheck:
       test:
         [
@@ -30,43 +42,19 @@ services:
 
   worker:
     environment:
-      AUTO_IMPORT_ENABLED: "false"
-      PAPER_SCHEDULER_ENABLED: "false"
-      CORE_UNIVERSE: "BTC-USD"
-      STREAM_EXCHANGE: "COINBASE"
-      STREAM_EXCHANGES: ""
-      STREAM_MAX_SYMBOLS_PER_EXCHANGE: "1"
-      TRACK_TOP_N_COINS: "5"
+      <<: *backend-env
 
   beat:
     environment:
-      AUTO_IMPORT_ENABLED: "false"
-      PAPER_SCHEDULER_ENABLED: "false"
-      CORE_UNIVERSE: "BTC-USD"
-      STREAM_EXCHANGE: "COINBASE"
-      STREAM_EXCHANGES: ""
-      STREAM_MAX_SYMBOLS_PER_EXCHANGE: "1"
-      TRACK_TOP_N_COINS: "5"
+      <<: *backend-env
 
   streamer:
     environment:
-      AUTO_IMPORT_ENABLED: "false"
-      PAPER_SCHEDULER_ENABLED: "false"
-      CORE_UNIVERSE: "BTC-USD"
-      STREAM_EXCHANGE: "COINBASE"
-      STREAM_EXCHANGES: ""
-      STREAM_MAX_SYMBOLS_PER_EXCHANGE: "1"
-      TRACK_TOP_N_COINS: "5"
+      <<: *backend-env
 
   writer:
     environment:
-      AUTO_IMPORT_ENABLED: "false"
-      PAPER_SCHEDULER_ENABLED: "false"
-      CORE_UNIVERSE: "BTC-USD"
-      STREAM_EXCHANGE: "COINBASE"
-      STREAM_EXCHANGES: ""
-      STREAM_MAX_SYMBOLS_PER_EXCHANGE: "1"
-      TRACK_TOP_N_COINS: "5"
+      <<: *backend-env
 
   frontend:
     command: >
