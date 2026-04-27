@@ -2,15 +2,29 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Install dependencies based on the preferred package manager
 COPY package.json package-lock.json* ./
-RUN npm install
+RUN npm ci
 
 COPY . .
 
-# Next.js collects telemetry data about general usage.
-# Learn more here: https://nextjs.org/telemetry
-# Uncomment the following line in case you want to disable telemetry during the build.
+ARG NEXT_PUBLIC_API_URL=/api
+ARG INTERNAL_API_URL=http://api:8000/api
+
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV INTERNAL_API_URL=${INTERNAL_API_URL}
 ENV NEXT_TELEMETRY_DISABLED 1
 
-CMD ["npm", "run", "dev"]
+RUN npm run build && \
+    mkdir -p .next/standalone/.next && \
+    cp -r .next/static .next/standalone/.next/static && \
+    if [ -d public ]; then cp -r public .next/standalone/public; fi
+
+WORKDIR /app/.next/standalone
+
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+
+EXPOSE 3000
+
+CMD ["node", "server.js"]
