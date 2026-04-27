@@ -1,3 +1,34 @@
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql+psycopg2://user:pass@db:5432/cryptoinsight
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/0
+  PRIMARY_EXCHANGE: ${PRIMARY_EXCHANGE:-kraken}
+  CORE_UNIVERSE: ${CORE_UNIVERSE:-BTC-USD,ETH-USD,SOL-USD}
+  TRACK_TOP_N_COINS: ${TRACK_TOP_N_COINS:-50}
+  STREAM_EXCHANGE: ${STREAM_EXCHANGE:-KRAKEN}
+  STREAM_EXCHANGES: ${STREAM_EXCHANGES:-KRAKEN}
+  STREAM_MAX_SYMBOLS_PER_EXCHANGE: ${STREAM_MAX_SYMBOLS_PER_EXCHANGE:-25}
+  PRICE_EXCHANGE_PRIORITY: ${PRICE_EXCHANGE_PRIORITY:-kraken,coinbase,binance}
+  MARKET_UNIVERSE_TARGET: ${MARKET_UNIVERSE_TARGET:-750}
+  MARKET_DEFAULT_PAGE_SIZE: ${MARKET_DEFAULT_PAGE_SIZE:-500}
+  KRAKEN_BACKFILL_BATCH_SIZE: ${KRAKEN_BACKFILL_BATCH_SIZE:-50}
+  KRAKEN_BACKFILL_MAX_ACTIVE: ${KRAKEN_BACKFILL_MAX_ACTIVE:-8}
+  KRAKEN_STREAM_TOP_N: ${KRAKEN_STREAM_TOP_N:-100}
+  KRAKEN_API_KEY: ${KRAKEN_API_KEY:-}
+  KRAKEN_API_SECRET: ${KRAKEN_API_SECRET:-}
+  CREW_ENABLED: ${CREW_ENABLED:-true}
+  CREW_LLM_PROVIDER: ${CREW_LLM_PROVIDER:-ollama}
+  CREW_LLM_BASE_URL: ${CREW_LLM_BASE_URL:-http://host.docker.internal:11434}
+  CREW_LLM_MODEL: ${CREW_LLM_MODEL:-llama3.3:70b}
+  CREW_MAX_SYMBOLS_PER_RUN: ${CREW_MAX_SYMBOLS_PER_RUN:-10}
+  CREW_LLM_TIMEOUT_SECONDS: ${CREW_LLM_TIMEOUT_SECONDS:-600}
+  CREW_RESEARCH_ENABLED: ${CREW_RESEARCH_ENABLED:-true}
+  CREW_TRIGGER_MONITOR_ENABLED: ${CREW_TRIGGER_MONITOR_ENABLED:-true}
+  CREW_RESEARCH_INTERVAL_SECONDS: ${CREW_RESEARCH_INTERVAL_SECONDS:-1800}
+  CREW_TRIGGER_POLL_SECONDS: ${CREW_TRIGGER_POLL_SECONDS:-5}
+  CREW_BANKROLL_RESET_DRAWDOWN_PCT: ${CREW_BANKROLL_RESET_DRAWDOWN_PCT:-0.95}
+  CREW_DEFAULT_STARTING_BANKROLL: ${CREW_DEFAULT_STARTING_BANKROLL:-10000}
+
 services:
   db:
     image: timescale/timescaledb-ha:pg16
@@ -20,6 +51,8 @@ services:
       - "6379:6379"
   migrate:
     build: .
+    environment:
+      <<: *backend-env
     depends_on:
       db:
         condition: service_healthy
@@ -28,8 +61,7 @@ services:
   api:
     build: .
     environment:
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      <<: *backend-env
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -46,8 +78,7 @@ services:
   worker:
     build: .
     environment:
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      <<: *backend-env
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -62,8 +93,7 @@ services:
   beat:
     build: .
     environment:
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      <<: *backend-env
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -76,8 +106,7 @@ services:
   streamer:
     build: .
     environment:
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      <<: *backend-env
     depends_on:
       db:
         condition: service_healthy
@@ -88,8 +117,7 @@ services:
   writer:
     build: .
     environment:
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      <<: *backend-env
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -103,12 +131,15 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
+      args:
+        NEXT_PUBLIC_API_URL: /api
+        INTERNAL_API_URL: http://api:8000/api
     ports:
       - "3000:3000"
     environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
       NEXT_PUBLIC_API_URL: /api
       INTERNAL_API_URL: http://api:8000/api
     depends_on:

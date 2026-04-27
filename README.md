@@ -1,196 +1,153 @@
-# CryptoInsight | Institutional-Grade Algorithmic Trading Platform
+# CryptoInsight / Investment Matrix
 
-**A high-performance, local-first financial intelligence terminal designed for sub-millisecond data ingestion, real-time analytics, and automated trading.**
+Self-hosted crypto market research and paper-trading platform built with FastAPI, PostgreSQL/TimescaleDB, Redis, Celery, and Next.js.
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-009688.svg)](https://fastapi.tiangolo.com/)
-[![Next.js](https://img.shields.io/badge/Next.js-14-black.svg)](https://nextjs.org/)
-[![TimescaleDB](https://img.shields.io/badge/TimescaleDB-pg16-FFA500.svg)](https://www.timescale.com/)
-[![Redis](https://img.shields.io/badge/Redis-7.x-red.svg)](https://redis.io/)
-[![Celery](https://img.shields.io/badge/Celery-5.x-37814A.svg)](https://docs.celeryq.dev/)
-[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg)](https://www.docker.com/)
-[![License](https://img.shields.io/badge/license-Proprietary-lightgrey.svg)](LICENSE)
+This project currently focuses on reliable local operation for market data ingestion, historical candles, backtesting, paper trading, and portfolio tracking. Real-money trading, ML prediction, and RL agents are not production-ready features in this codebase.
 
----
+## What Works Today
 
-## 🚀 Executive Summary
+- FastAPI backend with REST endpoints for coins, market data, indicators, backtests, paper trading, portfolios, imports, and auth.
+- PostgreSQL/TimescaleDB schema managed by Alembic migrations.
+- Redis-backed live tick cache and Redis Streams writer path.
+- Exchange stream adapters for Coinbase, Binance, and Kraken.
+- Celery tasks for coin ingestion, historical backfill, imports, and optional paper-trading schedules.
+- Market data status tracking so unsupported, warming, stale, and ready assets are visible instead of hidden behind generic N/A signals.
+- Local AI Crew desk APIs for run tracking, immutable research snapshots, prediction paths, recommendations, guardrails, audit logs, and guarded autonomous paper-trading execution.
+- Next.js frontend with market, pipeline, portfolio, backtest, paper-trading, login, register, and settings screens.
+- Backend unit tests, frontend unit tests, Playwright smoke tests, and optional Docker integration tests.
 
-CryptoInsight is a self-hosted, simplified institutional trading platform. Unlike retail tools that rely on third-party aggregators, this system ingests raw tick data directly from exchange WebSockets, normalizes it into a unified schema, and stores it in a time-series optimized database (TimescaleDB).
+## Requirements
 
-Core capabilities:
-*   **Tick-Level Fidelity**: Captures every trade for granular backtesting, not just OHLCV candles.
-*   **Event-Driven Architecture**: Uses Redis Streams and Celery to decouple ingestion from analysis.
-*   **Hybrid Storage**: Combines in-memory caching (Redis) for live views with columnar storage (TimescaleDB) for historical analysis.
-*   **Modern UI**: A premium Next.js frontend featuring real-time, hardware-accelerated charting.
+- Docker Desktop
+- Git
+- Node.js 20 if running the frontend outside Docker
+- Python 3.12 if running the backend outside Docker
 
----
+## Quick Start With Docker
 
-## 🏗 System Architecture
-
-The platform is architected as a set of decoupled microservices, prioritizing fault tolerance and scalability.
-
-```mermaid
-graph TD
-    subgraph "Ingestion Layer"
-        WS[WebSocket Streamers] --"Standardized Ticks"--> Redis(Redis Streams)
-    end
-
-    subgraph "Persistence Layer"
-        Redis --"Async Write"--> Writer[Writer Service]
-        Writer --"Batch Insert"--> TDB[(TimescaleDB)]
-    end
-
-    subgraph "Application Layer"
-        API[FastAPI Backend] --"Query"--> TDB
-        API --"Cache Hit"--> Redis
-        Worker[Celery Worker] --"Background Jobs"--> API
-    end
-
-    subgraph "Presentation Layer"
-        UI[Next.js Frontend] --"REST / WS"--> API
-    end
-```
-
-### 1. Data Ingestion (Streamers)
-Standalone Python services that maintain persistent WebSocket connections to exchanges (Coinbase, Binance, Kraken). They handle reconnection logic, message normalization, and publishing to the dedicated Redis stream.
-
-### 2. Persistence & Storage
-*   **TimescaleDB**: Used for long-term storage. "Hypertables" automatically partition data by time, ensuring constant-time insertion performance even as datasets grow to terabytes.
-*   **Redis**: Serves as both the hot message bus for live data and a look-aside cache for API responses (e.g., "latest price" queries).
-
-### 3. Asynchronous Analysis
-Celery workers handle computationally intensive tasks such as technical indicator calculation, rolling window aggregations, and historical measurement, preventing the main API thread from blocking.
-
----
-
-## 🛠 Technology Stack
-
-| Component | Technology | Role |
-| :--- | :--- | :--- |
-| **Backend API** | **FastAPI** | High-performance async REST API & WebSockets. |
-| **Database** | **TimescaleDB** (PostgreSQL) | Time-series storage with continuous aggregates. |
-| **Caching/Broker** | **Redis** | Pub/Sub for live ticks, task queue for Celery. |
-| **Task Queue** | **Celery** | Distributed task execution & scheduling. |
-| **Frontend** | **Next.js** (React) | Server-side rendered, responsive UI. |
-| **Charting** | **Lightweight Charts** | High-performance Canvas-based financial charts. |
-| **Containerization** | **Docker Compose** | Orchestration of all services. |
-
----
-
-## ⚡ Quick Start
-
-### Prerequisites
-*   **Docker Desktop** (running)
-*   **Git**
-
-### 1. Clone & Configure
 ```bash
 git clone https://github.com/your-username/investment_matrix.git
 cd investment_matrix
 copy .env.example .env
-```
-*Edit `.env` if you need to enable optional data sources (e.g., Binance US).*
-
-### 2. Launch with Docker (Recommended)
-This brings up the entire stack: Database, Cache, API, Workers, Streamers, and Frontend.
-
-```bash
 docker compose up --build -d
 ```
-*   **Frontend**: [http://localhost:3000](http://localhost:3000)
-*   **API Docs**: [http://localhost:8000/api/docs](http://localhost:8000/api/docs)
-*   **Health Check**: [http://localhost:8000/api/health](http://localhost:8000/api/health)
 
-### 3. Run Database Migrations
-If the container does not auto-migrate on first launch:
-```bash
-docker compose up migrate
+Services:
+
+- Frontend: http://localhost:3000
+- API health: http://localhost:8000/api/health
+- API docs: http://localhost:8000/docs
+- API OpenAPI JSON: http://localhost:8000/api/openapi.json
+
+The default Compose file passes the in-network database URL to all backend services:
+
+```ini
+DATABASE_URL=postgresql+psycopg2://user:pass@db:5432/cryptoinsight
 ```
 
----
+The default Compose frontend is production-built and served from Next.js standalone output so `http://localhost:3000` mirrors the stable self-hosted runtime. For hot reload, run the frontend locally with `npm run dev` instead of the default Compose frontend.
 
-## 💻 Local Development (Windows)
+For production-like deployments, set real values in `.env`:
 
-For developers who want to run the Python services locally while keeping infrastructure (DB/Redis) in Docker.
+```ini
+ENVIRONMENT=production
+SECRET_KEY=<long-random-secret>
+ENCRYPTION_KEY=<fernet-key>
+ADMIN_KEY=<admin-cache-key>
+AUTH_COOKIE_SECURE=true
+AUTH_COOKIE_SAMESITE=strict
+```
 
-### 1. Start Infrastructure Only
+Local AI crew runs are optional and disabled by default. To use the Crew desk with a local Ollama model, set:
+
+```env
+CREW_ENABLED=true
+CREW_LLM_PROVIDER=ollama
+CREW_LLM_BASE_URL=http://host.docker.internal:11434
+CREW_LLM_MODEL=llama3.1:8b
+CREW_MAX_SYMBOLS_PER_RUN=10
+```
+
+When disabled or unavailable, `/crew` shows the runtime status and the rest of the app continues to work.
+
+## Local Development
+
+Backend locally with Docker infrastructure:
+
 ```powershell
 docker compose up db redis -d
-```
-
-### 2. Setup Python Environment
-```powershell
-# Create venv
 python -m venv .venv
-
-# Activate (Windows Powershell)
 .\.venv\Scripts\activate
-
-# Install dependencies
 pip install -r requirements.txt
-```
-
-### 3. Configuration
-Create a `.env.local` file to point to localhost ports instead of Docker service names:
-```ini
-POSTGRES_USER=user
-POSTGRES_PASSWORD=pass
-POSTGRES_DB=cryptoinsight
-DATABASE_URL=postgresql+psycopg2://user:pass@localhost:5432/cryptoinsight
-CELERY_BROKER_URL=redis://localhost:6379/0
-CELERY_RESULT_BACKEND=redis://localhost:6379/0
-```
-
-### 4. Run Services
-You will need multiple terminal tabs:
-
-**Tab 1: API Server**
-```powershell
 uvicorn app.main:app --reload --env-file .env.local
 ```
 
-**Tab 2: Celery Worker**
+Worker services in separate terminals:
+
 ```powershell
 celery -A celery_app:celery_app worker --loglevel=info --pool=solo
-```
-
-**Tab 3: Streamer**
-```powershell
 python -m app.streamer
-```
-
-**Tab 4: Writer**
-```powershell
 python -m app.writer
 ```
 
-**Tab 5: Frontend**
+Frontend locally:
+
 ```powershell
 cd frontend
 npm install
 npm run dev
 ```
 
----
+`docker-compose.local.yml` is intentionally ignored for local overrides. Use `docker-compose.override.example.yml` as the template if you want Compose to read `.env` directly.
 
-## 🛣 Roadmap
+## Verification
 
-### Phase 1: Foundation (Current)
-*   [x] Real-time WebSocket ingestion (Coinbase, Kraken, Binance).
-*   [x] TimescaleDB schema with compression policies.
-*   [x] Next.js Dashboard with live ticking charts.
+Backend:
 
-### Phase 2: Intelligence & Analysis
-*   [x] Integration of `pandas-ta` for server-side indicator calculation.
-*   [ ] Machine Learning pipeline (ARIMA/LSTM) for price prediction.
-*   [x] Sentiment analysis engine for crypto news feeds.
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m ruff check .
+```
 
-### Phase 3: Execution
-*   [x] Paper trading engine integration (Alpaca/CCXT).
-*   [ ] Reinforcement Learning (RL) agent environment.
-*   [x] Automated strategy backtesting implementation.
+Frontend:
 
----
+```powershell
+cd frontend
+npm run lint
+npm test
+npm run build
+npm run test:e2e
+npm audit --omit=dev
+```
 
-## ⚠️ Disclaimer
-**Educational Use Only.** This software is for research purposes. Cryptocurrency trading involves significant risk. The authors are not responsible for financial losses incurred through the use of this software.
+Optional Docker integration tests:
+
+```powershell
+$env:RUN_DOCKER_INTEGRATION="1"
+.\.venv\Scripts\python.exe -m pytest tests/integration -q
+```
+
+## Architecture
+
+```mermaid
+graph TD
+    WS["Exchange WebSocket Streamers"] --> Redis["Redis Streams and Hot Cache"]
+    Redis --> Writer["Writer Service"]
+    Writer --> DB["PostgreSQL / TimescaleDB"]
+    API["FastAPI Backend"] --> DB
+    API --> Redis
+    Worker["Celery Worker / Beat"] --> DB
+    Worker --> Redis
+    UI["Next.js Frontend"] --> API
+```
+
+## Current Non-Goals
+
+- Real-money order execution.
+- Real-money autonomous trading.
+- Cloud-dependent AI features as a default requirement.
+- Public SaaS operation without additional security, observability, and compliance work.
+
+## License
+
+This repository is proprietary. See [LICENSE](LICENSE).

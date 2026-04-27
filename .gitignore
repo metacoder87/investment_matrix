@@ -35,12 +35,17 @@ venv/
 # Docker
 docker-compose.override.yml
 docker-compose.local.yml
+!docker-compose.override.example.yml
 
 
 # Test / lint caches
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.tmp_pytest/
+pytest-cache-files-*/
+.ci_docker_probe/
+frontend/test-results/
 
 # IDEs
 .idea/

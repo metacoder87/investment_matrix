@@ -43,6 +43,6 @@ Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "   App Started!                           " -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "Frontend:    http://localhost:3000" -ForegroundColor Green
-Write-Host "API Docs:    http://localhost:8000/api/docs" -ForegroundColor Green
+Write-Host "API Docs:    http://localhost:8000/docs" -ForegroundColor Green
 Write-Host "Health Check: http://localhost:8000/api/health" -ForegroundColor Green
 Write-Host "==========================================" -ForegroundColor Cyan

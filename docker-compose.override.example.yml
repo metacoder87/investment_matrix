@@ -1,0 +1,24 @@
+services:
+  migrate:
+    env_file:
+      - .env
+
+  api:
+    env_file:
+      - .env
+
+  worker:
+    env_file:
+      - .env
+
+  beat:
+    env_file:
+      - .env
+
+  streamer:
+    env_file:
+      - .env
+
+  writer:
+    env_file:
+      - .env
