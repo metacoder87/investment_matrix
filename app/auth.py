@@ -8,17 +8,23 @@ from cryptography.fernet import Fernet
 from app.config import settings
 
 # --- Configuration ---
-# You should load these from settings/env in production
+ENVIRONMENT = (settings.ENVIRONMENT or "local").strip().lower()
+IS_PRODUCTION = ENVIRONMENT in {"prod", "production"}
+
+if IS_PRODUCTION and not settings.SECRET_KEY:
+    raise RuntimeError("SECRET_KEY must be set when ENVIRONMENT=production")
+
 SECRET_KEY = settings.SECRET_KEY or "dev_secret_key_change_me_in_prod"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 # 1 day
 
 # Encryption Key (Must be 32 url-safe base64-encoded bytes)
-# In dev we generate one if missing, but distinct runs will fail to decrypt.
-# For demo purposes, we use a fixed dev key if settings is empty.
+# In local/test we use a deterministic fallback only when settings are empty.
+if IS_PRODUCTION and not settings.ENCRYPTION_KEY:
+    raise RuntimeError("ENCRYPTION_KEY must be set when ENVIRONMENT=production")
+
 ENCRYPTION_KEY = settings.ENCRYPTION_KEY # Should be bytes
 if not ENCRYPTION_KEY:
-    # Deterministic key for dev (INSECURE FOR PROD)
     ENCRYPTION_KEY = base64.urlsafe_b64encode(b"01234567890123456789012345678901") 
 
 pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")

@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session, joinedload
 
 from database import get_db
 from app.models.portfolio import Portfolio, Order, Holding, OrderSide, OrderStatus
+from app.models.user import User
+from app.routers.auth import get_current_user
 from app.redis_client import redis_client
 import json
 
@@ -43,13 +45,22 @@ class PortfolioSummary(BaseModel):
 
 # --- Endpoints ---
 
+@router.post("", response_model=PortfolioSummary, include_in_schema=False)
 @router.post("/", response_model=PortfolioSummary)
-def create_portfolio(pf: PortfolioCreate, db: Session = Depends(get_db)):
-    exist = db.query(Portfolio).filter(Portfolio.name == pf.name).first()
+def create_portfolio(
+    pf: PortfolioCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    exist = (
+        db.query(Portfolio)
+        .filter(Portfolio.user_id == current_user.id, Portfolio.name == pf.name)
+        .first()
+    )
     if exist:
         raise HTTPException(400, "Portfolio name already exists")
     
-    new_pf = Portfolio(name=pf.name)
+    new_pf = Portfolio(name=pf.name, user_id=current_user.id)
     db.add(new_pf)
     db.commit()
     db.refresh(new_pf)
@@ -62,18 +73,26 @@ def create_portfolio(pf: PortfolioCreate, db: Session = Depends(get_db)):
         "holdings": []
     }
 
+@router.get("", response_model=List[dict], include_in_schema=False)
 @router.get("/", response_model=List[dict])
-def list_portfolios(db: Session = Depends(get_db)):
+def list_portfolios(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     # Simple list (for dropdowns)
-    pfs = db.query(Portfolio).all()
+    pfs = db.query(Portfolio).filter(Portfolio.user_id == current_user.id).all()
     return [{"id": p.id, "name": p.name} for p in pfs]
 
 @router.get("/{id}", response_model=PortfolioSummary)
-async def get_portfolio(id: int, db: Session = Depends(get_db)):
+async def get_portfolio(
+    id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     pf = (
         db.query(Portfolio)
         .options(joinedload(Portfolio.holdings))
-        .filter(Portfolio.id == id)
+        .filter(Portfolio.id == id, Portfolio.user_id == current_user.id)
         .first()
     )
     
@@ -144,8 +163,17 @@ async def get_portfolio(id: int, db: Session = Depends(get_db)):
     }
 
 @router.post("/{id}/orders")
-def create_order(id: int, order: OrderCreate, db: Session = Depends(get_db)):
-    pf = db.query(Portfolio).filter(Portfolio.id == id).first()
+def create_order(
+    id: int,
+    order: OrderCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    pf = (
+        db.query(Portfolio)
+        .filter(Portfolio.id == id, Portfolio.user_id == current_user.id)
+        .first()
+    )
     if not pf:
         raise HTTPException(404, "Portfolio not found")
 

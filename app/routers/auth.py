@@ -5,6 +5,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
 from database import get_db
+from app.config import settings
 from app.models.user import User
 from app.models.portfolio import Portfolio
 from app.auth import (
@@ -20,6 +21,23 @@ from pydantic import BaseModel, EmailStr
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token", auto_error=False)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+def _is_local_environment() -> bool:
+    return (settings.ENVIRONMENT or "local").strip().lower() in {"dev", "development", "local", "test"}
+
+
+def _auth_cookie_secure() -> bool:
+    if settings.AUTH_COOKIE_SECURE is not None:
+        return settings.AUTH_COOKIE_SECURE
+    return not _is_local_environment()
+
+
+def _auth_cookie_samesite() -> str:
+    configured = (settings.AUTH_COOKIE_SAMESITE or "").strip().lower()
+    if configured in {"lax", "strict", "none"}:
+        return configured
+    return "lax" if _is_local_environment() else "strict"
 
 
 # --- Schemas ---
@@ -111,8 +129,8 @@ def login_for_access_token(
         key="auth_token",
         value=access_token,
         httponly=True,
-        secure=False,   # Set to True in production with HTTPS
-        samesite="lax",
+        secure=_auth_cookie_secure(),
+        samesite=_auth_cookie_samesite(),
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         path="/"        # Explicitly set to root
     )

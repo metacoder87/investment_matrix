@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Enum as SAEnum, Boolean
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Enum as SAEnum, Boolean, UniqueConstraint
 from sqlalchemy.orm import relationship
 import enum
 
@@ -28,6 +28,9 @@ class TransactionType(str, enum.Enum):
 
 class Portfolio(Base):
     __tablename__ = "portfolios"
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_portfolios_user_name"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True, nullable=False)
