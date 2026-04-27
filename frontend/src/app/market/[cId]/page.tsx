@@ -2,18 +2,14 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, TrendingUp, TrendingDown, Activity, BarChart3, Wallet, LineChart, Zap } from "lucide-react";
+import { useParams } from "next/navigation";
+import { ArrowLeft, TrendingUp, TrendingDown, Activity, BarChart3, Wallet, LineChart, Zap, Bot } from "lucide-react";
 import CandlestickChart from "@/components/CandlestickChart";
 import IndicatorPanel from "@/components/IndicatorPanel";
 import SignalCard from "@/components/SignalCard";
 import DeepAnalysis from "@/components/DeepAnalysis";
 import { formatPrice } from "@/utils/format";
-
-interface MarketPageProps {
-    params: {
-        cId: string;
-    };
-}
+import { getApiBaseUrl } from "@/utils/api";
 
 interface MarketTicker {
     symbol: string;
@@ -26,7 +22,29 @@ interface MarketTicker {
     volume_24h?: number;
 }
 
-export default function MarketPage({ params }: MarketPageProps) {
+interface ResearchSnapshot {
+    exchange: string;
+    symbol: string;
+    price: number | null;
+    price_timestamp: string | null;
+    freshness_seconds: number | null;
+    row_count: number;
+    data_status: {
+        status: string;
+        reason: string | null;
+        row_count: number;
+        latest_candle_at: string | null;
+    };
+    signal: {
+        signal: string;
+        confidence: number;
+    } | null;
+    known_limitations: string[];
+}
+
+export default function MarketPage() {
+    const params = useParams<{ cId: string }>();
+
     // Normalize symbol (e.g., "btc-usd")
     const rawSymbol = params.cId;
     const isPair = rawSymbol.includes("-");
@@ -34,10 +52,35 @@ export default function MarketPage({ params }: MarketPageProps) {
 
     // State
     const [ticker, setTicker] = useState<MarketTicker | null>(null);
+    const [snapshot, setSnapshot] = useState<ResearchSnapshot | null>(null);
+    const [snapshotError, setSnapshotError] = useState<string | null>(null);
     const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
     const [showIndicators, setShowIndicators] = useState(true);
 
     // WebSocket for Live Data
+    useEffect(() => {
+        let cancelled = false;
+        const fetchSnapshot = async () => {
+            try {
+                const response = await fetch(`${getApiBaseUrl()}/research/assets/auto/${encodeURIComponent(symbol)}`);
+                if (!response.ok) throw new Error(`Research snapshot returned ${response.status}`);
+                const data = await response.json();
+                if (!cancelled) {
+                    setSnapshot(data);
+                    setSnapshotError(null);
+                }
+            } catch (err) {
+                if (!cancelled) setSnapshotError(err instanceof Error ? err.message : "Research snapshot unavailable");
+            }
+        };
+        fetchSnapshot();
+        const interval = window.setInterval(fetchSnapshot, 60000);
+        return () => {
+            cancelled = true;
+            window.clearInterval(interval);
+        };
+    }, [symbol]);
+
     useEffect(() => {
         const ws = new WebSocket("wss://ws-feed.exchange.coinbase.com");
         const cbSymbol = symbol.replace("-USDT", "-USD");
@@ -84,6 +127,9 @@ export default function MarketPage({ params }: MarketPageProps) {
         setLastUpdated(new Date());
     }, []);
 
+    const displayedPrice = ticker?.price ?? snapshot?.price ?? null;
+    const statusLabel = snapshot?.data_status.status?.replaceAll("_", " ") ?? "loading";
+
     return (
         <main className="min-h-screen bg-[#050505] p-6 text-gray-200">
             {/* Header / Nav */}
@@ -116,8 +162,8 @@ export default function MarketPage({ params }: MarketPageProps) {
                         <div className="space-y-1">
                             <span className="text-sm text-gray-500">Current Price</span>
                             <div className="flex items-center gap-3">
-                                <span className={`text-4xl font-mono font-medium ${ticker?.side === 'buy' ? 'text-cyan-400' : 'text-pink-500'}`}>
-                                    {formatPrice(ticker?.price)}
+                                <span className={`text-4xl font-mono font-medium ${ticker?.side === 'sell' ? 'text-pink-500' : 'text-cyan-400'}`}>
+                                    {formatPrice(displayedPrice)}
                                 </span>
                                 {ticker && (
                                     <span className="flex items-center gap-1 rounded bg-white/5 px-2 py-0.5 text-sm">
@@ -155,10 +201,30 @@ export default function MarketPage({ params }: MarketPageProps) {
 
                 {/* Right: Actions */}
                 <div className="flex flex-col justify-center gap-4 rounded-2xl border border-white/5 bg-white/[0.02] p-6 backdrop-blur-sm">
-                    <button className="flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-500 py-3 font-semibold text-black hover:bg-cyan-400 transition-all shadow-[0_0_20px_rgba(34,211,238,0.3)]">
+                    <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                        <div className="text-xs uppercase tracking-wide text-gray-500">Research status</div>
+                        <div className="mt-1 text-sm font-semibold capitalize text-white">{statusLabel}</div>
+                        <div className="mt-1 text-xs text-gray-500">
+                            {snapshot ? `${snapshot.exchange.toUpperCase()} · ${snapshot.row_count} candles` : snapshotError || "Loading snapshot..."}
+                        </div>
+                        {snapshot?.data_status.reason && (
+                            <div className="mt-2 text-xs text-yellow-300">{snapshot.data_status.reason}</div>
+                        )}
+                    </div>
+                    <Link
+                        href={`/paper?symbol=${encodeURIComponent(symbol)}`}
+                        className="flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-500 py-3 font-semibold text-black shadow-[0_0_20px_rgba(34,211,238,0.3)] transition-all hover:bg-cyan-400"
+                    >
                         <Wallet className="h-4 w-4" />
-                        Trade {symbol.split("-")[0]}
-                    </button>
+                        Paper Trade {symbol.split("-")[0]}
+                    </Link>
+                    <Link
+                        href={`/crew?symbol=${encodeURIComponent(symbol)}`}
+                        className="flex w-full items-center justify-center gap-2 rounded-lg border border-cyan-500/40 bg-cyan-500/10 py-3 font-semibold text-cyan-100 transition-all hover:bg-cyan-500/20"
+                    >
+                        <Bot className="h-4 w-4" />
+                        Analyze with Crew
+                    </Link>
                     <button
                         onClick={() => setShowIndicators(!showIndicators)}
                         className={`flex w-full items-center justify-center gap-2 rounded-lg border py-3 font-semibold transition-all ${showIndicators
@@ -181,6 +247,11 @@ export default function MarketPage({ params }: MarketPageProps) {
 
                 {/* Candlestick Chart Component */}
                 <CandlestickChart symbol={symbol} exchange="auto" />
+                {snapshot?.known_limitations?.length ? (
+                    <div className="rounded-lg border border-yellow-500/20 bg-yellow-500/10 p-3 text-sm text-yellow-100">
+                        {snapshot.known_limitations[0]}
+                    </div>
+                ) : null}
             </div>
 
             {/* Technical Indicators */}

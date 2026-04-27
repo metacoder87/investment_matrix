@@ -1,25 +1,29 @@
-export const formatPrice = (price: number | undefined | null): string => {
-    if (price === undefined || price === null) return "---";
-    if (price === 0) return "$0.00";
+export const formatPrice = (price: number | string | undefined | null): string => {
+    if (price === undefined || price === null || price === "---") return "---";
+    const num = Number(price);
+    if (isNaN(num)) return "---";
+    if (num === 0) return "$0.00";
 
     // For very small numbers (e.g. SHIB/PEPE), show significant digits
-    if (price < 0.01) {
-        return `$${price.toFixed(8)}`; // e.g. $0.00001234
+    if (num < 0.01) {
+        return `$${num.toFixed(8)}`; // e.g. $0.00001234
     }
-    if (price < 1) {
-        return `$${price.toFixed(4)}`; // e.g. $0.1234
+    if (num < 1) {
+        return `$${num.toFixed(4)}`; // e.g. $0.1234
     }
-    if (price < 10) {
-        return `$${price.toFixed(3)}`; // e.g. $5.123
+    if (num < 10) {
+        return `$${num.toFixed(3)}`; // e.g. $5.123
     }
     // Standard 2 decimals for larger numbers
-    return `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    return `$${num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
 
-export const formatCompactNumber = (num: number | undefined | null): string => {
-    if (num === undefined || num === null) return "---";
+export const formatCompactNumber = (num: number | string | undefined | null): string => {
+    if (num === undefined || num === null || num === "---") return "---";
+    const n = Number(num);
+    if (isNaN(n)) return "---";
     return new Intl.NumberFormat('en-US', {
         notation: "compact",
         maximumFractionDigits: 2
-    }).format(num);
+    }).format(n);
 };

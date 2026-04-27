@@ -212,7 +212,7 @@ export default function SearchCoinModal({ isOpen, onClose, onCoinAdded }: Search
                         </div>
                     ) : query.length >= 2 && !loading ? (
                         <div className="py-12 text-center text-gray-500">
-                            No coins found for "{query}"
+                            No coins found for <span className="font-mono text-gray-400">{query}</span>
                         </div>
                     ) : (
                         <div className="py-12 text-center text-gray-500">

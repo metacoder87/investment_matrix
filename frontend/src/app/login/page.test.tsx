@@ -18,11 +18,14 @@ vi.mock("@/context/AuthContext", () => ({
 describe("LoginPage", () => {
     beforeEach(() => {
         login.mockReset();
+        login.mockResolvedValue(true);
+        window.history.pushState({}, "", "/login");
         process.env.NEXT_PUBLIC_API_URL = "http://api.test";
         vi.stubGlobal("fetch", vi.fn());
     });
 
-    it("submits form-encoded credentials and calls login on success", async () => {
+    it("submits form-encoded credentials and awaits session login on success", async () => {
+        window.history.pushState({}, "", "/login?redirect=%2Fmarket");
         vi.mocked(fetch).mockResolvedValueOnce({
             ok: true,
             json: async () => ({ access_token: "header.payload.signature" }),
@@ -45,7 +48,27 @@ describe("LoginPage", () => {
         expect(init?.credentials).toBe("include");
         expect(String(init?.body)).toContain("username=trader%40example.com");
         expect(String(init?.body)).toContain("password=hunter2");
-        expect(login).toHaveBeenCalledWith("header.payload.signature");
+        await waitFor(() => expect(login).toHaveBeenCalledWith("header.payload.signature", "/market"));
+    });
+
+    it("renders an error when the cookie session is not confirmed", async () => {
+        login.mockResolvedValueOnce(false);
+        vi.mocked(fetch).mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({ access_token: "header.payload.signature" }),
+        } as Response);
+
+        const user = userEvent.setup();
+        const { container } = render(<LoginPage />);
+
+        await user.type(screen.getByPlaceholderText("name@example.com"), "trader@example.com");
+        await user.type(
+            container.querySelector('input[type="password"]') as HTMLInputElement,
+            "hunter2",
+        );
+        await user.click(screen.getByRole("button", { name: /sign in/i }));
+
+        expect(await screen.findByText("Sign in succeeded, but the browser session was not established. Please try again.")).toBeInTheDocument();
     });
 
     it("renders an error when login fails", async () => {

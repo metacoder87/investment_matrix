@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState } from "react";
-import { useRouter, usePathname, useSearchParams } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { getApiBaseUrl } from "@/utils/api";
 
 interface User {
@@ -14,43 +14,56 @@ interface AuthContextType {
     user: User | null;
     isAuthenticated: boolean;
     isLoading: boolean;
-    login: (token: string) => void;
+    login: (token: string, redirectTo?: string) => Promise<boolean>;
     logout: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+const SESSION_CONFIRM_RETRIES = 3;
+const SESSION_CONFIRM_DELAY_MS = 150;
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [user, setUser] = useState<User | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const router = useRouter();
     const pathname = usePathname();
-    const searchParams = useSearchParams();
 
     useEffect(() => {
         checkAuth();
     }, []);
 
+    const fetchCurrentUser = async () => {
+        const apiUrl = getApiBaseUrl();
+        const response = await fetch(`${apiUrl}/auth/me`, {
+            credentials: "include"
+        });
+
+        if (!response.ok) {
+            return null;
+        }
+
+        const data = await response.json();
+        return {
+            id: data.id ?? 0,
+            email: data.email ?? "",
+            full_name: data.full_name ?? null
+        };
+    };
+
     const checkAuth = async () => {
         const isAuthRoute = pathname.startsWith("/login") || pathname.startsWith("/register");
         const isPublicRoot = pathname === "/";
         try {
-            const apiUrl = getApiBaseUrl();
-            const response = await fetch(`${apiUrl}/auth/me`, {
-                credentials: "include"
-            });
+            const currentUser = await fetchCurrentUser();
 
-            if (response.ok) {
-                const data = await response.json();
-                setUser({
-                    id: data.id ?? 0,
-                    email: data.email ?? "",
-                    full_name: data.full_name ?? null
-                });
+            if (currentUser) {
+                setUser(currentUser);
             } else {
                 setUser(null);
-                if ((response.status === 401 || response.status === 403) && !isAuthRoute && !isPublicRoot) {
-                    router.push("/login");
+                if (!isAuthRoute && !isPublicRoot) {
+                    router.push(`/login?redirect=${encodeURIComponent(pathname)}`);
                 }
             }
         } catch (e) {
@@ -61,20 +74,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
     };
 
-    const login = (token: string) => {
-        // Token is now stored in httpOnly cookie set by backend
-        // We just need to decode it to get user info for UI
-        try {
-            const payload = JSON.parse(atob(token.split('.')[1]));
-            setUser({ id: payload.user_id, email: payload.sub, full_name: null });
+    const login = async (_token: string, redirectTo = "/") => {
+        for (let attempt = 1; attempt <= SESSION_CONFIRM_RETRIES; attempt += 1) {
+            try {
+                const currentUser = await fetchCurrentUser();
+                if (currentUser) {
+                    setUser(currentUser);
+                    router.replace(redirectTo);
+                    router.refresh();
+                    return true;
+                }
+            } catch (e) {
+                console.error("Session confirmation failed", e);
+            }
 
-            // Check for redirect parameter
-            const redirectTo = searchParams.get("redirect") || "/";
-            router.push(redirectTo);
-        } catch (e) {
-            console.error("Failed to decode token", e);
-            router.push("/");
+            if (attempt < SESSION_CONFIRM_RETRIES) {
+                await delay(SESSION_CONFIRM_DELAY_MS);
+            }
         }
+
+        setUser(null);
+        return false;
     };
 
     const logout = async () => {

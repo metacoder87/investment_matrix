@@ -5,9 +5,11 @@ import { getApiBaseUrl } from "@/utils/api";
 
 export default function SettingsPage() {
     const [apiUrl, setApiUrl] = useState("");
+    const [adminKey, setAdminKey] = useState("");
 
     useEffect(() => {
         setApiUrl(getApiBaseUrl());
+        setAdminKey(window.localStorage.getItem("admin_key") || "");
     }, []);
 
     return (
@@ -27,6 +29,18 @@ export default function SettingsPage() {
                                 className="w-full bg-black/40 border border-white/10 rounded px-4 py-2 text-gray-300 font-mono text-sm"
                             />
                             <p className="text-xs text-gray-500 mt-2">Configured via environment variables.</p>
+                        </div>
+                        <div>
+                            <label className="block text-sm text-gray-400 mb-2">Admin Key</label>
+                            <input
+                                type="password"
+                                value={adminKey}
+                                onChange={(event) => {
+                                    setAdminKey(event.target.value);
+                                    window.localStorage.setItem("admin_key", event.target.value);
+                                }}
+                                className="w-full bg-black/40 border border-white/10 rounded px-4 py-2 text-gray-300 font-mono text-sm"
+                            />
                         </div>
                     </div>
                 </section>
@@ -51,7 +65,11 @@ export default function SettingsPage() {
                             onClick={async () => {
                                 if (!confirm("Are you sure? This will clear all cached market data.")) return;
                                 try {
-                                    const res = await fetch(`${apiUrl}/system/cache/clear`, { method: "POST" });
+                                    const res = await fetch(`${apiUrl}/system/cache/clear`, {
+                                        method: "POST",
+                                        headers: adminKey ? { "X-Admin-Key": adminKey } : {},
+                                        credentials: "include",
+                                    });
                                     if (res.ok) alert("Cache cleared successfully!");
                                     else alert("Failed to clear cache.");
                                 } catch (e) {

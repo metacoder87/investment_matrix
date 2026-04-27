@@ -116,6 +116,13 @@ export default function PaperTradingPage() {
     }, []);
 
     useEffect(() => {
+        const requestedSymbol = new URLSearchParams(window.location.search).get("symbol");
+        if (requestedSymbol) {
+            setSymbol(requestedSymbol.toUpperCase());
+        }
+    }, []);
+
+    useEffect(() => {
         if (selectedAccount === null) return;
         loadPositions(selectedAccount);
         loadOrders(selectedAccount);

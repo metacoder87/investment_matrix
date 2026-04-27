@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { CoinsTable } from "@/components/CoinsTable";
+import { MarketOperationsPanel } from "@/components/MarketOperationsPanel";
 import SearchCoinModal from "@/components/SearchCoinModal";
 import { Plus } from "lucide-react";
 
@@ -15,7 +16,7 @@ export default function MarketPage() {
     };
 
     return (
-        <main className="p-8 max-w-7xl mx-auto">
+        <main className="mx-auto max-w-[1600px] p-4 md:p-8">
             {/* Header with Add Button */}
             <div className="flex items-center justify-between mb-6">
                 <h1 className="text-3xl font-bold text-primary">Market Overview</h1>
@@ -29,6 +30,10 @@ export default function MarketPage() {
             </div>
 
             {/* Coins Table */}
+            <div className="mb-6">
+                <MarketOperationsPanel />
+            </div>
+
             <div className="w-full">
                 <CoinsTable key={refreshKey} />
             </div>

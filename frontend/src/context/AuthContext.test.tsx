@@ -8,7 +8,6 @@ import {
     resetNavigationMocks,
     router,
     setPathname,
-    setSearchParams,
 } from "../../test/mocks/next-navigation";
 
 
@@ -23,7 +22,7 @@ function Consumer() {
             <div data-testid="loading">{String(auth.isLoading)}</div>
             <div data-testid="state">{auth.isAuthenticated ? "authenticated" : "anonymous"}</div>
             <div data-testid="email">{auth.user?.email ?? ""}</div>
-            <button onClick={() => auth.login(makeToken({ user_id: 7, sub: "trader@example.com" }))}>
+            <button onClick={() => void auth.login(makeToken({ user_id: 7, sub: "trader@example.com" }), "/paper")}>
                 Call Login
             </button>
             <button onClick={() => void auth.logout()}>
@@ -77,17 +76,19 @@ describe("AuthProvider", () => {
             </AuthProvider>,
         );
 
-        await waitFor(() => expect(router.push).toHaveBeenCalledWith("/login"));
+        await waitFor(() => expect(router.push).toHaveBeenCalledWith("/login?redirect=%2Fportfolio"));
         expect(screen.getByTestId("state")).toHaveTextContent("anonymous");
     });
 
-    it("uses the redirect query when login is called", async () => {
+    it("uses the supplied redirect when login is called", async () => {
         setPathname("/login");
-        setSearchParams("redirect=%2Fpaper");
         vi.mocked(fetch).mockResolvedValueOnce({
             ok: false,
             status: 401,
             json: async () => ({ detail: "unauthorized" }),
+        } as Response).mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({ id: 7, email: "trader@example.com", full_name: "Trader" }),
         } as Response);
 
         render(
@@ -101,9 +102,13 @@ describe("AuthProvider", () => {
         const user = userEvent.setup();
         await user.click(screen.getByText("Call Login"));
 
-        expect(screen.getByTestId("state")).toHaveTextContent("authenticated");
+        await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("authenticated"));
         expect(screen.getByTestId("email")).toHaveTextContent("trader@example.com");
-        expect(router.push).toHaveBeenCalledWith("/paper");
+        expect(fetch).toHaveBeenLastCalledWith("http://api.test/auth/me", {
+            credentials: "include",
+        });
+        expect(router.replace).toHaveBeenCalledWith("/paper");
+        expect(router.refresh).toHaveBeenCalled();
     });
 
     it("calls the logout endpoint and redirects to login", async () => {
