@@ -14,6 +14,10 @@ import app.models.market  # noqa: F401
 import app.models.portfolio  # noqa: F401
 import app.models.ticks  # noqa: F401
 import app.models.imports  # noqa: F401
+import app.models.user  # noqa: F401
+import app.models.paper  # noqa: F401
+import app.models.backtest  # noqa: F401
+import app.models.research  # noqa: F401
 
 
 config = context.config

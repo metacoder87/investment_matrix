@@ -13,7 +13,10 @@ class Settings(BaseSettings):
     # App / routing
     APP_NAME: str = "CryptoInsight"
     API_PREFIX: str = "/api"
-    UI_PREFIX: str = "/ui"
+    ENVIRONMENT: str = Field(
+        default="local",
+        description="Runtime environment: local, test, or production.",
+    )
 
     # Database Configuration (TimescaleDB/Postgres)
     POSTGRES_USER: str = "user"
@@ -28,13 +31,19 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
 
+    # Exchange/source defaults
+    PRIMARY_EXCHANGE: str = Field(
+        default="kraken",
+        description="Primary exchange id for market data, research snapshots, and paper-trading defaults.",
+    )
+
     # Streaming defaults
     CORE_UNIVERSE: str = "BTC-USD,ETH-USD,SOL-USD"
     TRACK_TOP_N_COINS: int = Field(
-        default=500,
+        default=50,
         description="Number of top coins by market cap to automatically track and backfill on startup."
     )
-    STREAM_EXCHANGE: str = "COINBASE"
+    STREAM_EXCHANGE: str = "KRAKEN"
     STREAM_EXCHANGES: str = Field(
         default="",
         description="Comma-separated exchanges to stream from (overrides STREAM_EXCHANGE when set). Example: COINBASE,BINANCE,KRAKEN",
@@ -44,8 +53,28 @@ class Settings(BaseSettings):
         description="Safety cap to avoid subscribing to too many symbols per exchange in the zero-cost default stack.",
     )
     PRICE_EXCHANGE_PRIORITY: str = Field(
-        default="binance,coinbase,kraken",
+        default="kraken,coinbase,binance",
         description="Comma-separated exchange priority list for price data when exchange is auto.",
+    )
+    MARKET_UNIVERSE_TARGET: int = Field(
+        default=750,
+        description="Target number of exchange-supported markets to discover/backfill for the market dashboard.",
+    )
+    MARKET_DEFAULT_PAGE_SIZE: int = Field(
+        default=500,
+        description="Default number of assets returned by high-density market views.",
+    )
+    KRAKEN_BACKFILL_BATCH_SIZE: int = Field(
+        default=50,
+        description="Maximum Kraken markets queued by one backfill operation.",
+    )
+    KRAKEN_BACKFILL_MAX_ACTIVE: int = Field(
+        default=8,
+        description="Maximum active Kraken backfill tasks before queuing more is skipped.",
+    )
+    KRAKEN_STREAM_TOP_N: int = Field(
+        default=100,
+        description="Maximum number of Kraken markets to stream live by default.",
     )
 
     # Tick storage policy (TimescaleDB)
@@ -72,10 +101,33 @@ class Settings(BaseSettings):
     PAPER_SCHEDULER_ENABLED: bool = False
     PAPER_SCHEDULER_INTERVAL_SECONDS: int = 60
 
+    # Local AI crew runtime. Disabled by default so the app remains usable
+    # without Ollama or any local model installed.
+    CREW_ENABLED: bool = False
+    CREW_LLM_PROVIDER: str = "ollama"
+    CREW_LLM_BASE_URL: str = "http://host.docker.internal:11434"
+    CREW_LLM_MODEL: str = "llama3.1:8b"
+    CREW_MAX_SYMBOLS_PER_RUN: int = 10
+    CREW_LLM_TIMEOUT_SECONDS: int = 600
+    CREW_RESEARCH_ENABLED: bool = False
+    CREW_TRIGGER_MONITOR_ENABLED: bool = False
+    CREW_RESEARCH_INTERVAL_SECONDS: int = 1800
+    CREW_TRIGGER_POLL_SECONDS: int = 5
+    CREW_BANKROLL_RESET_DRAWDOWN_PCT: float = 0.95
+    CREW_DEFAULT_STARTING_BANKROLL: float = 10_000.0
+
     # Exchange Specifics
     BINANCE_TLD: str = Field(
         default="com",
         description="Top-level domain for Binance API (com or us).",
+    )
+    KRAKEN_API_KEY: str = Field(
+        default="",
+        description="Optional Kraken API key. Not used for paper trading or real order placement.",
+    )
+    KRAKEN_API_SECRET: str = Field(
+        default="",
+        description="Optional Kraken API secret. Not used for paper trading or real order placement.",
     )
 
     # Security
@@ -86,6 +138,18 @@ class Settings(BaseSettings):
     ENCRYPTION_KEY: str = Field(
         default="",
         description="Fernet key. Leave blank only for local/CI dev fallback behavior.",
+    )
+    ADMIN_KEY: str = Field(
+        default="",
+        description="Admin API key for protected system routes.",
+    )
+    AUTH_COOKIE_SECURE: bool | None = Field(
+        default=None,
+        description="Set auth cookies with the Secure attribute. Defaults to true outside local/test.",
+    )
+    AUTH_COOKIE_SAMESITE: str = Field(
+        default="",
+        description="Auth cookie SameSite policy: lax, strict, or none. Defaults to strict outside local/test.",
     )
     
     # CORS Configuration

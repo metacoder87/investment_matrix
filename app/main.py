@@ -17,7 +17,9 @@ from app.analysis import add_technical_indicators
 from app.analysis_quant import calculate_risk_metrics
 from app.config import settings
 from app.services.backfill import StartupGapFiller, bootstrap_universe
+from app.services.asset_status import build_signal_status
 from app.services.price_selection import resolve_price_exchange
+from app.services.market_resolution import configured_exchange_priority
 from app.connectors.fundamental import CoinGeckoConnector
 from app.connectors.sentiment import Sentiment
 from app.connectors.news_api import NewsConnector
@@ -29,6 +31,7 @@ from app.redis_client import redis_client
 from app.models.market import MarketTrade
 from app.models.imports import ImportRun
 from app.models.instrument import Coin, Price
+from app.models.research import AssetDataStatus
 from app.models.ticks import Asset, Tick
 from celery_app import celery_app
 from app.signals.engine import SignalEngine
@@ -102,13 +105,17 @@ def create_app() -> FastAPI:
 
     api = APIRouter(prefix=settings.API_PREFIX)
     
-    from app.routers import backtest, imports, paper_trading, portfolio, system, auth
+    from app.routers import backtest, crew, imports, paper_trading, portfolio, research, system, auth
     api.include_router(portfolio.router)
     api.include_router(system.router)
     api.include_router(imports.router)
     api.include_router(backtest.router)
     api.include_router(paper_trading.router)
     api.include_router(auth.router)
+    api.include_router(research.router)
+    api.include_router(research.market_router)
+    api.include_router(research.ops_router)
+    api.include_router(crew.router)
 
     @api.get("/health", tags=["Meta"])
     async def health():
@@ -120,7 +127,7 @@ def create_app() -> FastAPI:
         symbol: str,
         timeframe: str = "1m",
         limit: int = 100,
-        exchange: str = "binance",
+        exchange: str = settings.PRIMARY_EXCHANGE,
     ):
         task = celery_app.send_task(
             "celery_worker.tasks.ingest_historical_data",
@@ -169,7 +176,7 @@ def create_app() -> FastAPI:
 
     @api.post("/backfill/universe", status_code=202, tags=["Ingestion"])
     async def start_universe_backfill(
-        exchange: str = Query(default="coinbase", description="Exchange to fetch from"),
+        exchange: str = Query(default=settings.PRIMARY_EXCHANGE, description="Exchange to fetch from"),
         days: int = Query(default=7, ge=1, le=30, description="Days to backfill"),
     ):
         """
@@ -184,7 +191,7 @@ def create_app() -> FastAPI:
     @api.get("/backfill/gaps/{symbol:path}", tags=["Ingestion"])
     async def detect_gaps(
         symbol: str,
-        exchange: str = Query(default="coinbase"),
+        exchange: str = Query(default=settings.PRIMARY_EXCHANGE),
         timeframe: str = Query(default="1m"),
     ):
         """
@@ -212,6 +219,8 @@ def create_app() -> FastAPI:
         offset: int = Query(default=0, ge=0, description="Pagination offset."),
         search: str | None = Query(default=None, description="Filter by symbol or name."),
         source: str = Query(default="auto", description="auto, db, coingecko"),
+        exchange: str = Query(default="auto", description="auto or a specific exchange id for signal data."),
+        analyzable_only: bool = Query(default=False, description="Only return assets suitable for default signals."),
     ):
         """
         Returns coins from the local DB when available, with a CoinGecko fallback.
@@ -244,7 +253,12 @@ def create_app() -> FastAPI:
                     if s:
                         symbols_base.append(s)
 
-                price_exchange = _select_exchange_for_symbols(db, symbols_base)
+                requested_exchange = (exchange or "auto").strip().lower()
+                price_exchange = (
+                    requested_exchange
+                    if requested_exchange and requested_exchange != "auto"
+                    else _select_exchange_for_symbols(db, symbols_base)
+                )
 
                 latest_sub = (
                     db.query(
@@ -284,6 +298,38 @@ def create_app() -> FastAPI:
                     s = (c.symbol or "").strip().upper().replace("/", "-")
                     s = StartupGapFiller._normalize_symbol_for_exchange(s, price_exchange)
                     symbols_page.append(s)
+
+                price_stat_rows = (
+                    db.query(
+                        Price.symbol,
+                        func.count(Price.id).label("row_count"),
+                        func.max(Price.timestamp).label("latest_ts"),
+                    )
+                    .filter(Price.exchange == price_exchange, Price.symbol.in_(symbols_page))
+                    .group_by(Price.symbol)
+                    .all()
+                    if symbols_page
+                    else []
+                )
+                price_stats = {
+                    row.symbol: {
+                        "row_count": int(row.row_count or 0),
+                        "latest_ts": row.latest_ts,
+                    }
+                    for row in price_stat_rows
+                }
+
+                status_rows = (
+                    db.query(AssetDataStatus)
+                    .filter(
+                        AssetDataStatus.exchange.in_([price_exchange, "auto"]),
+                        AssetDataStatus.symbol.in_(symbols_page),
+                    )
+                    .all()
+                    if symbols_page
+                    else []
+                )
+                status_map = {(row.exchange, row.symbol): row for row in status_rows}
 
                 analysis_map = {}
                 
@@ -355,6 +401,24 @@ def create_app() -> FastAPI:
                     key = StartupGapFiller._normalize_symbol_for_exchange(key, price_exchange)
                     
                     analysis_data = analysis_map.get(key, {})
+                    stats = price_stats.get(key, {"row_count": 0, "latest_ts": None})
+                    status_record = status_map.get((price_exchange, key)) or status_map.get(("auto", key))
+                    signal_status = build_signal_status(
+                        exchange=price_exchange,
+                        symbol=key,
+                        name=coin.name,
+                        row_count=stats["row_count"],
+                        latest_candle_at=stats["latest_ts"],
+                        status_record=status_record,
+                        has_signal=bool(analysis_data.get("signal")),
+                    )
+                    signal_is_displayable = signal_status["status"] in {"ready", "stale"}
+
+                    if analyzable_only and signal_status["status"] in {
+                        "not_applicable",
+                        "unsupported_market",
+                    }:
+                        continue
 
                     payload.append(
                         {
@@ -368,10 +432,13 @@ def create_app() -> FastAPI:
                             "price_change_percentage_24h": coin.price_change_percentage_24h,
                             "last_updated": coin.last_updated.isoformat() if coin.last_updated else None,
                             "analysis": {
-                                "rsi": analysis_data.get("rsi"), 
-                                "signal": analysis_data.get("signal"),
-                                "confidence": analysis_data.get("confidence")
-                            }
+                                "rsi": analysis_data.get("rsi") if signal_is_displayable else None,
+                                "signal": analysis_data.get("signal") if signal_is_displayable else None,
+                                "confidence": analysis_data.get("confidence") if signal_is_displayable else None,
+                                "status": signal_status["status"],
+                                "reason": signal_status["reason"],
+                            },
+                            "data_status": signal_status,
                         }
                     )
                 return payload
@@ -500,7 +567,7 @@ def create_app() -> FastAPI:
             
             # Insert new coin
             new_coin = Coin(
-                coingecko_id=coingecko_id,
+                id=coingecko_id,
                 symbol=symbol,
                 name=name,
                 market_cap_rank=None,  # Will be updated by next coin list fetch
@@ -512,8 +579,8 @@ def create_app() -> FastAPI:
             logger.info(f"Added new coin to tracking: {symbol} ({name})")
             
             # Trigger backfill for this coin
-            exchange = settings.STREAM_EXCHANGE or "coinbase"
-            symbol_pair = f"{symbol}-USD"  # Assume USD pair for now
+            exchange = "auto"
+            symbol_pair = symbol
             
             backfill_task = celery_app.send_task(
                 "celery_worker.tasks.backfill_historical_candles",
@@ -657,23 +724,18 @@ def create_app() -> FastAPI:
         symbol = _normalize_dash_symbol(symbol)
         if exchange == "binance" and symbol.endswith("-USD"):
             return f"{symbol[:-4]}-USDT"
-        if exchange == "coinbase" and "-" not in symbol:
+        if exchange in {"coinbase", "kraken"} and "-" not in symbol:
             return f"{symbol}-USD"
         return symbol
 
     
     def _priority_exchanges() -> list[str]:
-        raw = (settings.PRICE_EXCHANGE_PRIORITY or "").strip()
-        if not raw:
-            raw = (settings.STREAM_EXCHANGES or settings.STREAM_EXCHANGE or "").strip()
-        if not raw:
-            return ["coinbase"]
-        return [part.strip().lower() for part in raw.split(",") if part.strip()]
+        return configured_exchange_priority()
 
     def _select_exchange_for_symbols(db: Session, symbols: list[str]) -> str:
         priority = _priority_exchanges()
         if not priority:
-            return "coinbase"
+            return settings.PRIMARY_EXCHANGE.strip().lower() or "kraken"
         for ex in priority:
             normalized = [_normalize_symbol_for_exchange(ex, s) for s in symbols if s]
             if not normalized:
@@ -2333,7 +2395,7 @@ def create_app() -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     async def root():
-        return {"message": "CryptoInsight API is running. Go to /api/docs for documentation."}
+        return {"message": "CryptoInsight API is running. Go to /docs for documentation."}
 
     return app
 
