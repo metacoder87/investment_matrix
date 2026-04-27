@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Enum as SAEnum, Boolean, JSON
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Enum as SAEnum, Boolean, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship
 import enum
 
@@ -25,9 +25,13 @@ class PaperOrderStatus(str, enum.Enum):
 
 class PaperAccount(Base):
     __tablename__ = "paper_accounts"
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_paper_accounts_user_name"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(100), unique=True, index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    name = Column(String(100), index=True, nullable=False)
     base_currency = Column(String(10), default="USD")
     cash_balance = Column(Float, default=0.0)
 

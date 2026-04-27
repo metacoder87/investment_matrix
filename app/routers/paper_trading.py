@@ -7,12 +7,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.paper import (
     PaperAccount,
     PaperPosition,
     PaperOrder,
     PaperSchedule,
 )
+from app.models.user import User
+from app.routers.auth import get_current_user
 from app.services.paper_trading import PaperStepPayload, execute_paper_step
 from database import get_db
 
@@ -43,7 +46,7 @@ class PaperAccountResponse(BaseModel):
 
 class PaperStepRequest(BaseModel):
     symbol: str
-    exchange: str = "coinbase"
+    exchange: str = Field(default_factory=lambda: settings.PRIMARY_EXCHANGE)
     timeframe: str = "1m"
     lookback: int = 200
     as_of: datetime | None = None
@@ -79,7 +82,7 @@ class PaperOrderResponse(BaseModel):
 class PaperScheduleCreate(BaseModel):
     account_id: int
     symbol: str
-    exchange: str = "coinbase"
+    exchange: str = Field(default_factory=lambda: settings.PRIMARY_EXCHANGE)
     timeframe: str = "1m"
     lookback: int = 200
     source: str = "auto"
@@ -114,12 +117,21 @@ class PaperScheduleResponse(BaseModel):
 
 
 @router.post("/accounts", response_model=PaperAccountResponse)
-def create_account(payload: PaperAccountCreate, db: Session = Depends(get_db)):
-    exists = db.query(PaperAccount).filter(PaperAccount.name == payload.name).first()
+def create_account(
+    payload: PaperAccountCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    exists = (
+        db.query(PaperAccount)
+        .filter(PaperAccount.user_id == current_user.id, PaperAccount.name == payload.name)
+        .first()
+    )
     if exists:
         raise HTTPException(status_code=400, detail="Paper account name already exists.")
 
     account = PaperAccount(
+        user_id=current_user.id,
         name=payload.name,
         base_currency=payload.base_currency,
         cash_balance=payload.cash_balance,
@@ -147,9 +159,19 @@ def create_account(payload: PaperAccountCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/accounts", response_model=list[PaperAccountResponse])
-def list_accounts(db: Session = Depends(get_db)):
-    accounts = db.query(PaperAccount).all()
-    positions = db.query(PaperPosition).all()
+def list_accounts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    accounts = db.query(PaperAccount).filter(PaperAccount.user_id == current_user.id).all()
+    account_ids = [account.id for account in accounts]
+    positions = (
+        db.query(PaperPosition)
+        .filter(PaperPosition.account_id.in_(account_ids))
+        .all()
+        if account_ids
+        else []
+    )
     positions_by_account: dict[int, list[PaperPosition]] = {}
     for position in positions:
         positions_by_account.setdefault(position.account_id, []).append(position)
@@ -175,10 +197,12 @@ def list_accounts(db: Session = Depends(get_db)):
 
 
 @router.get("/accounts/{account_id}", response_model=PaperAccountResponse)
-def get_account(account_id: int, db: Session = Depends(get_db)):
-    account = db.query(PaperAccount).filter(PaperAccount.id == account_id).first()
-    if not account:
-        raise HTTPException(status_code=404, detail="Paper account not found.")
+def get_account(
+    account_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    account = _get_owned_account(db, account_id, current_user)
 
     positions = (
         db.query(PaperPosition)
@@ -201,7 +225,12 @@ def get_account(account_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/accounts/{account_id}/positions", response_model=list[PaperPositionResponse])
-def list_positions(account_id: int, db: Session = Depends(get_db)):
+def list_positions(
+    account_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _get_owned_account(db, account_id, current_user)
     positions = (
         db.query(PaperPosition)
         .filter(PaperPosition.account_id == account_id)
@@ -226,7 +255,9 @@ def list_orders(
     account_id: int,
     limit: int = 50,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
+    _get_owned_account(db, account_id, current_user)
     orders = (
         db.query(PaperOrder)
         .filter(PaperOrder.account_id == account_id)
@@ -253,10 +284,13 @@ def list_orders(
 
 
 @router.post("/accounts/{account_id}/step")
-def paper_step(account_id: int, payload: PaperStepRequest, db: Session = Depends(get_db)) -> dict[str, Any]:
-    account = db.query(PaperAccount).filter(PaperAccount.id == account_id).first()
-    if not account:
-        raise HTTPException(status_code=404, detail="Paper account not found.")
+def paper_step(
+    account_id: int,
+    payload: PaperStepRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    account = _get_owned_account(db, account_id, current_user)
 
     try:
         result = execute_paper_step(
@@ -284,10 +318,12 @@ def paper_step(account_id: int, payload: PaperStepRequest, db: Session = Depends
 
 
 @router.post("/schedules", response_model=PaperScheduleResponse)
-def create_schedule(payload: PaperScheduleCreate, db: Session = Depends(get_db)):
-    account = db.query(PaperAccount).filter(PaperAccount.id == payload.account_id).first()
-    if not account:
-        raise HTTPException(status_code=404, detail="Paper account not found.")
+def create_schedule(
+    payload: PaperScheduleCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _get_owned_account(db, payload.account_id, current_user)
 
     schedule = PaperSchedule(
         account_id=payload.account_id,
@@ -309,16 +345,28 @@ def create_schedule(payload: PaperScheduleCreate, db: Session = Depends(get_db))
 
 
 @router.get("/schedules", response_model=list[PaperScheduleResponse])
-def list_schedules(db: Session = Depends(get_db)):
-    schedules = db.query(PaperSchedule).order_by(PaperSchedule.created_at.desc()).all()
+def list_schedules(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    schedules = (
+        db.query(PaperSchedule)
+        .join(PaperAccount, PaperSchedule.account_id == PaperAccount.id)
+        .filter(PaperAccount.user_id == current_user.id)
+        .order_by(PaperSchedule.created_at.desc())
+        .all()
+    )
     return [_schedule_response(schedule) for schedule in schedules]
 
 
 @router.patch("/schedules/{schedule_id}", response_model=PaperScheduleResponse)
-def update_schedule(schedule_id: int, payload: PaperScheduleUpdate, db: Session = Depends(get_db)):
-    schedule = db.query(PaperSchedule).filter(PaperSchedule.id == schedule_id).first()
-    if not schedule:
-        raise HTTPException(status_code=404, detail="Schedule not found.")
+def update_schedule(
+    schedule_id: int,
+    payload: PaperScheduleUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    schedule = _get_owned_schedule(db, schedule_id, current_user)
 
     if payload.is_active is not None:
         schedule.is_active = payload.is_active
@@ -339,16 +387,13 @@ def run_schedule(
     schedule_id: int,
     as_of: Optional[datetime] = None,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    schedule = db.query(PaperSchedule).filter(PaperSchedule.id == schedule_id).first()
-    if not schedule:
-        raise HTTPException(status_code=404, detail="Schedule not found.")
+    schedule = _get_owned_schedule(db, schedule_id, current_user)
     if not schedule.is_active:
         raise HTTPException(status_code=409, detail="Schedule is inactive.")
 
-    account = db.query(PaperAccount).filter(PaperAccount.id == schedule.account_id).first()
-    if not account:
-        raise HTTPException(status_code=404, detail="Paper account not found.")
+    account = _get_owned_account(db, schedule.account_id, current_user)
 
     result = execute_paper_step(
         db=db,
@@ -378,6 +423,29 @@ def run_schedule(
     db.commit()
 
     return {"schedule": _schedule_response(schedule), "result": result}
+
+
+def _get_owned_account(db: Session, account_id: int, current_user: User) -> PaperAccount:
+    account = (
+        db.query(PaperAccount)
+        .filter(PaperAccount.id == account_id, PaperAccount.user_id == current_user.id)
+        .first()
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail="Paper account not found.")
+    return account
+
+
+def _get_owned_schedule(db: Session, schedule_id: int, current_user: User) -> PaperSchedule:
+    schedule = (
+        db.query(PaperSchedule)
+        .join(PaperAccount, PaperSchedule.account_id == PaperAccount.id)
+        .filter(PaperSchedule.id == schedule_id, PaperAccount.user_id == current_user.id)
+        .first()
+    )
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found.")
+    return schedule
 
 
 def _schedule_response(schedule: PaperSchedule) -> PaperScheduleResponse:

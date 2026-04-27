@@ -4,8 +4,8 @@ from __future__ import annotations
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.models.instrument import Price
+from app.services.market_resolution import configured_exchange_priority
 
 
 def _normalize_exchange(value: str) -> str:
@@ -13,12 +13,7 @@ def _normalize_exchange(value: str) -> str:
 
 
 def _priority_exchanges() -> list[str]:
-    raw = (settings.PRICE_EXCHANGE_PRIORITY or "").strip()
-    if not raw:
-        raw = (settings.STREAM_EXCHANGES or settings.STREAM_EXCHANGE or "").strip()
-    if not raw:
-        return ["coinbase"]
-    return [_normalize_exchange(part) for part in raw.split(",") if part.strip()]
+    return [_normalize_exchange(part) for part in configured_exchange_priority()]
 
 
 def resolve_price_exchange(

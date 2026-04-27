@@ -11,6 +11,7 @@ class BacktestRun(Base):
     __tablename__ = "backtest_runs"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     name = Column(String(100), nullable=False)
     symbol = Column(String(50), nullable=False, index=True)
     exchange = Column(String(20), nullable=False)
@@ -58,6 +59,7 @@ class BacktestReport(Base):
     __tablename__ = "backtest_reports"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     name = Column(String(100), nullable=False)
     report_type = Column(String(50), nullable=False)
     symbol = Column(String(50), nullable=False, index=True)

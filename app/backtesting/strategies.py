@@ -25,6 +25,16 @@ class Strategy(Protocol):
 
 
 @dataclass
+class StrategyMetadata:
+    name: str
+    required_indicators: list[str]
+    minimum_candles: int
+    supported_timeframes: list[str]
+    allowed_order_types: list[str]
+    default_risk: dict
+
+
+@dataclass
 class SmaCrossStrategy:
     short_window: int = 20
     long_window: int = 50
@@ -99,6 +109,33 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "buy_hold": BuyHoldStrategy,
 }
 
+STRATEGY_METADATA: dict[str, StrategyMetadata] = {
+    "sma_cross": StrategyMetadata(
+        name="sma_cross",
+        required_indicators=["sma_fast", "sma_slow"],
+        minimum_candles=50,
+        supported_timeframes=["1m", "5m", "15m", "1h", "4h", "1d"],
+        allowed_order_types=["market"],
+        default_risk={"max_position_pct": 0.10},
+    ),
+    "rsi": StrategyMetadata(
+        name="rsi",
+        required_indicators=["rsi"],
+        minimum_candles=50,
+        supported_timeframes=["1m", "5m", "15m", "1h", "4h", "1d"],
+        allowed_order_types=["market"],
+        default_risk={"max_position_pct": 0.10},
+    ),
+    "buy_hold": StrategyMetadata(
+        name="buy_hold",
+        required_indicators=[],
+        minimum_candles=2,
+        supported_timeframes=["1m", "5m", "15m", "1h", "4h", "1d"],
+        allowed_order_types=["market"],
+        default_risk={"max_position_pct": 1.0},
+    ),
+}
+
 
 def create_strategy(name: str, params: dict | None = None) -> Strategy:
     if not name:
@@ -112,8 +149,20 @@ def create_strategy(name: str, params: dict | None = None) -> Strategy:
 
 
 def list_strategies() -> list[dict]:
+    params = {
+        "sma_cross": {"short_window": 20, "long_window": 50},
+        "rsi": {"length": 14, "buy_threshold": 30.0, "sell_threshold": 70.0},
+        "buy_hold": {},
+    }
     return [
-        {"name": "sma_cross", "params": {"short_window": 20, "long_window": 50}},
-        {"name": "rsi", "params": {"length": 14, "buy_threshold": 30.0, "sell_threshold": 70.0}},
-        {"name": "buy_hold", "params": {}},
+        {
+            "name": name,
+            "params": params[name],
+            "required_indicators": metadata.required_indicators,
+            "minimum_candles": metadata.minimum_candles,
+            "supported_timeframes": metadata.supported_timeframes,
+            "allowed_order_types": metadata.allowed_order_types,
+            "default_risk": metadata.default_risk,
+        }
+        for name, metadata in STRATEGY_METADATA.items()
     ]

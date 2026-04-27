@@ -7,6 +7,7 @@ from app.config import settings
 from app.models.instrument import Price, Coin
 from database import session_scope
 from celery_app import celery_app
+from app.services.asset_status import classify_asset
 
 logger = logging.getLogger("cryptoinsight.services.backfill")
 
@@ -23,7 +24,7 @@ class StartupGapFiller:
             if exchange == "binance" and symbol.endswith("-USD"):
                 return f"{symbol[:-4]}-USDT"
             return symbol
-        if exchange == "coinbase":
+        if exchange in {"coinbase", "kraken"}:
             return f"{symbol}-USD"
         if exchange == "binance":
             return f"{symbol}-USDT"
@@ -56,14 +57,14 @@ class StartupGapFiller:
             coin_count = db.query(func.count(Coin.id)).scalar()
         
         symbols: list[str] = []
-        top_n = settings.TRACK_TOP_N_COINS
+        top_n = min(settings.TRACK_TOP_N_COINS or 50, 50)
         if coin_count == 0:
             logger.info("Coin list empty. Triggering ingestion and continuing with CORE_UNIVERSE.")
             celery_app.send_task("celery_worker.tasks.fetch_and_store_coin_list")
             symbols = cls.get_core_symbols()
         else:
             # 2. Select Dynamic Universe (Top N by Market Cap)
-            top_n = settings.TRACK_TOP_N_COINS
+            top_n = min(settings.TRACK_TOP_N_COINS or 50, 50)
             with session_scope() as db:
                 top_coins = (
                     db.query(Coin.symbol, Coin.id)
@@ -78,10 +79,11 @@ class StartupGapFiller:
             if not symbols:
                 symbols = cls.get_core_symbols()
         
-        logger.info(f"Identified {len(symbols)} assets in active universe (Top {top_n}).")
+        symbols = [symbol for symbol in symbols if classify_asset(symbol).is_analyzable]
+        logger.info(f"Identified {len(symbols)} analyzable assets in active universe (Top {top_n}).")
 
         # 3. Queue Backfills
-        exchange = settings.STREAM_EXCHANGE.lower() or "coinbase"
+        exchange = "auto"
         
         backfill_count = 0
         with session_scope() as db:
@@ -162,8 +164,8 @@ async def bootstrap_universe() -> dict:
         await asyncio.sleep(5)
         
         # Get top N coins to backfill
-        top_n = min(settings.TRACK_TOP_N_COINS or 500, 100)  # Limit to 100 initially to avoid overwhelming
-        exchange = (settings.STREAM_EXCHANGE or "coinbase").lower()
+        top_n = min(settings.TRACK_TOP_N_COINS or 50, 50)
+        exchange = "auto"
         
         with session_scope() as db:
             # Get top coins by market cap rank
@@ -182,12 +184,13 @@ async def bootstrap_universe() -> dict:
                 symbols = StartupGapFiller.get_core_symbols()
             else:
                 symbols = [c.symbol.upper() for c in top_coins]
+        symbols = [symbol for symbol in symbols if classify_asset(symbol).is_analyzable]
         
         logger.info(f"📈 Queueing backfill for {len(symbols)} top coins...")
         
         # Queue backfill tasks (stagger to avoid rate limits)
         backfill_tasks = []
-        for i, symbol in enumerate(symbols[:50]):  # Start with top 50 to avoid overwhelming
+        for i, symbol in enumerate(symbols[:50]):
             symbol_pair = StartupGapFiller._normalize_symbol_for_exchange(symbol, exchange)
             
             try:

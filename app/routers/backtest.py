@@ -11,6 +11,8 @@ from app.backtesting.engine import BacktestEngine
 from app.backtesting.strategies import create_strategy, list_strategies
 from app.backtesting.walkforward import run_walk_forward
 from app.models.backtest import BacktestRun, BacktestTrade, BacktestReport
+from app.models.user import User
+from app.routers.auth import get_current_user
 from app.services.market_candles import load_candles_df
 from database import get_db
 
@@ -85,7 +87,11 @@ def get_strategies():
 
 
 @router.post("/", response_model=BacktestResponse)
-def run_backtest(payload: BacktestRequest, db: Session = Depends(get_db)):
+def run_backtest(
+    payload: BacktestRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     try:
         candles = load_candles_df(
             db=db,
@@ -117,6 +123,7 @@ def run_backtest(payload: BacktestRequest, db: Session = Depends(get_db)):
 
     name = payload.name or f"{payload.strategy}:{payload.symbol}:{payload.start.date().isoformat()}"
     run = BacktestRun(
+        user_id=current_user.id,
         name=name,
         symbol=payload.symbol.strip().upper(),
         exchange=payload.exchange.strip().lower(),
@@ -184,7 +191,11 @@ def run_backtest(payload: BacktestRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/walk-forward", response_model=WalkForwardResponse)
-def run_walk_forward_backtest(payload: WalkForwardRequest, db: Session = Depends(get_db)):
+def run_walk_forward_backtest(
+    payload: WalkForwardRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     try:
         candles = load_candles_df(
             db=db,
@@ -226,6 +237,7 @@ def run_walk_forward_backtest(payload: WalkForwardRequest, db: Session = Depends
     if payload.store_report:
         name = payload.name or f"walk_forward:{payload.strategy}:{payload.symbol}:{payload.start.date().isoformat()}"
         report = BacktestReport(
+            user_id=current_user.id,
             name=name,
             report_type="walk_forward",
             symbol=payload.symbol.strip().upper(),
@@ -253,8 +265,16 @@ def run_walk_forward_backtest(payload: WalkForwardRequest, db: Session = Depends
 
 
 @router.get("/reports/{report_id}")
-def get_report(report_id: int, db: Session = Depends(get_db)):
-    report = db.query(BacktestReport).filter(BacktestReport.id == report_id).first()
+def get_report(
+    report_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    report = (
+        db.query(BacktestReport)
+        .filter(BacktestReport.id == report_id, BacktestReport.user_id == current_user.id)
+        .first()
+    )
     if not report:
         raise HTTPException(status_code=404, detail="Backtest report not found.")
     return {
@@ -273,8 +293,17 @@ def get_report(report_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/reports")
-def list_reports(db: Session = Depends(get_db)):
-    reports = db.query(BacktestReport).order_by(BacktestReport.created_at.desc()).limit(50).all()
+def list_reports(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    reports = (
+        db.query(BacktestReport)
+        .filter(BacktestReport.user_id == current_user.id)
+        .order_by(BacktestReport.created_at.desc())
+        .limit(50)
+        .all()
+    )
     return [
         {
             "id": report.id,
@@ -290,8 +319,16 @@ def list_reports(db: Session = Depends(get_db)):
 
 
 @router.get("/{run_id}", response_model=BacktestResponse)
-def get_backtest(run_id: int, db: Session = Depends(get_db)):
-    run = db.query(BacktestRun).filter(BacktestRun.id == run_id).first()
+def get_backtest(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    run = (
+        db.query(BacktestRun)
+        .filter(BacktestRun.id == run_id, BacktestRun.user_id == current_user.id)
+        .first()
+    )
     if not run:
         raise HTTPException(status_code=404, detail="Backtest run not found.")
 

@@ -254,7 +254,7 @@ def _copy_ticks(
         SELECT time, asset_id, price, volume, side, exchange_trade_id, received_at,
                ingest_source, is_aggregated, owner_id
         FROM ticks_stage
-        ON CONFLICT (asset_id, exchange_trade_id, time)
+        ON CONFLICT (asset_id, exchange_trade_id, time) WHERE exchange_trade_id IS NOT NULL
         DO NOTHING;
         """
     )
