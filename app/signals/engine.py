@@ -412,11 +412,16 @@ class SignalEngine:
         
         if pd.notna(atr) and atr > 0:
             if signal_type in {SignalType.BUY, SignalType.STRONG_BUY}:
-                stop_loss = current_price - (2.0 * atr)
-                target_price = current_price + (4.0 * atr)  # 2:1 Reward ratio
+                stop_loss = current_price - max(2.0 * atr, current_price * 0.01)
+                target_price = current_price + max(4.0 * atr, current_price * 0.02)  # 2:1 Reward ratio
             elif signal_type in {SignalType.SELL, SignalType.STRONG_SELL}:
-                stop_loss = current_price + (2.0 * atr)
-                target_price = current_price - (4.0 * atr)
+                stop_loss = current_price + max(2.0 * atr, current_price * 0.01)
+                target_price = current_price - max(4.0 * atr, current_price * 0.02)
+
+        def _round_dynamic(val: float | None) -> float | None:
+            if val is None:
+                return None
+            return round(val, 8) if current_price < 1.0 else round(val, 4)
 
         # Build indicators dict for frontend
         indicators = {}
@@ -449,8 +454,8 @@ class SignalEngine:
             reasons=reasons,
             indicators=indicators,
             risk_reward=2.0,
-            target_price=round(target_price, 2) if target_price else None,
-            stop_loss=round(stop_loss, 2) if stop_loss else None,
+            target_price=_round_dynamic(target_price),
+            stop_loss=_round_dynamic(stop_loss),
         )
 
     def generate_signals_batch(
