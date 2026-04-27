@@ -6,12 +6,17 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import ccxt.async_support as ccxt
+from sqlalchemy import func
 
+import app.models.portfolio  # noqa: F401
 from app.connectors.fundamental import CoinGeckoConnector
 from app.models.instrument import Coin, Price
 from app.models.paper import PaperAccount, PaperSchedule
+from app.models.research import AgentGuardrailProfile
+from app.models.user import User
 from celery_app import celery_app
 from database import session_scope
+from app.services.asset_status import classify_asset, update_asset_status
 from app.services.imports.download import (
     binance_vision_daily_url,
     build_download_spec,
@@ -22,8 +27,25 @@ from app.services.imports.download import (
 from app.services.imports.ingest import ingest_ticks
 from app.services.imports.registry import get_importer
 from app.services.paper_trading import PaperStepPayload, execute_paper_step
+from app.services.market_resolution import (
+    ResolvedMarket,
+    is_unsupported_market_error,
+    resolve_supported_market,
+)
 
 logger = logging.getLogger("cryptoinsight.tasks")
+
+
+async def _close_exchange_client(exchange) -> None:
+    try:
+        await exchange.close()
+        await asyncio.sleep(0)
+    except Exception as exc:  # pragma: no cover - defensive cleanup for CCXT/aiohttp
+        logger.warning("Failed to close CCXT exchange client cleanly: %s", exc)
+
+
+class UnsupportedMarketError(ValueError):
+    pass
 
 
 def _normalize_symbol(symbol: str, exchange_id: str) -> str:
@@ -98,7 +120,7 @@ def ingest_historical_data(
                 limit=limit,
             )
         finally:
-            await exchange.close()
+            await _close_exchange_client(exchange)
 
     ohlcv = asyncio.run(fetch())
 
@@ -119,7 +141,7 @@ def ingest_historical_data(
     return f"Successfully ingested {len(ohlcv)} data points for {symbol_db}"
 
 
-@celery_app.task(bind=True)
+@celery_app.task(bind=True, soft_time_limit=300, time_limit=360, max_retries=0)
 def backfill_historical_candles(
     self,
     symbol: str,
@@ -141,9 +163,42 @@ def backfill_historical_candles(
         days: Number of days to backfill (default: 7)
         start_from: Optional ISO timestamp to start from (for resuming)
     """
-    exchange_key = exchange_id.strip().lower()
-    symbol_ccxt = _normalize_symbol(symbol, exchange_key)
-    symbol_db = _normalize_symbol_db(symbol, exchange_key)
+    requested_exchange = exchange_id.strip().lower()
+    resolved: ResolvedMarket | None = None
+    if requested_exchange == "auto":
+        resolved = asyncio.run(resolve_supported_market(symbol, requested_exchange))
+        if resolved is None:
+            symbol_db = symbol.strip().upper().replace("/", "-")
+            with session_scope() as db:
+                update_asset_status(
+                    db,
+                    exchange="auto",
+                    symbol=symbol_db,
+                    status="unsupported",
+                    is_supported=False,
+                    is_analyzable=False,
+                    task_id=getattr(self.request, "id", None),
+                    failure_reason="No configured exchange exposes a supported spot market for this symbol.",
+                )
+            return {"status": "unsupported", "symbol": symbol_db, "exchange": "auto", "fetched": 0}
+        exchange_key = resolved.exchange
+        symbol_ccxt = resolved.ccxt_symbol
+        symbol_db = resolved.db_symbol
+    else:
+        exchange_key = requested_exchange
+        symbol_ccxt = _normalize_symbol(symbol, exchange_key)
+        symbol_db = _normalize_symbol_db(symbol, exchange_key)
+
+    with session_scope() as db:
+        update_asset_status(
+            db,
+            exchange=exchange_key,
+            symbol=symbol_db,
+            status="backfill_pending",
+            is_supported=True,
+            is_analyzable=True,
+            task_id=getattr(self.request, "id", None),
+        )
     
     async def fetch_all():
         exchange_cls = getattr(ccxt, exchange_key, None)
@@ -154,6 +209,10 @@ def backfill_historical_candles(
         all_candles = []
         
         try:
+            markets = await exchange.load_markets()
+            if symbol_ccxt not in markets:
+                raise UnsupportedMarketError(f"{exchange_key} does not have market symbol {symbol_ccxt}")
+
             timeframe_ms = exchange.parse_timeframe(timeframe) * 1000
             
             # Calculate time range
@@ -168,6 +227,7 @@ def backfill_historical_candles(
             current_since = start_time
             total_fetched = 0
             
+            consecutive_errors = 0
             while current_since < end_time:
                 try:
                     candles = await exchange.fetch_ohlcv(
@@ -195,28 +255,89 @@ def backfill_historical_candles(
                     await asyncio.sleep(0.2)
                     
                 except Exception as e:
+                    if isinstance(e, UnsupportedMarketError) or is_unsupported_market_error(e):
+                        raise UnsupportedMarketError(str(e)) from e
+                    if "429" in str(e) or "too many requests" in str(e).lower():
+                        raise RuntimeError(f"Rate limited during backfill: {e}") from e
+                    consecutive_errors += 1
                     logger.warning(f"Chunk fetch error at {current_since}: {e}")
+                    if consecutive_errors >= 3:
+                        raise RuntimeError(
+                            f"Aborting backfill after {consecutive_errors} consecutive chunk failures at {current_since}: {e}"
+                        ) from e
                     await asyncio.sleep(1)
                     continue
             
             return all_candles
             
         finally:
-            await exchange.close()
+            await _close_exchange_client(exchange)
     
-    logger.info(f"Starting backfill for {symbol_ccxt} ({days} days, {timeframe})")
-    candles = asyncio.run(fetch_all())
+    logger.info(f"Starting backfill for {symbol_ccxt} on {exchange_key} ({days} days, {timeframe})")
+    try:
+        candles = asyncio.run(fetch_all())
+    except UnsupportedMarketError as exc:
+        with session_scope() as db:
+            update_asset_status(
+                db,
+                exchange=exchange_key,
+                symbol=symbol_db,
+                status="unsupported",
+                is_supported=False,
+                is_analyzable=False,
+                task_id=getattr(self.request, "id", None),
+                failure_reason=str(exc),
+            )
+        logger.info("Backfill unsupported market: %s %s (%s)", exchange_key, symbol_db, exc)
+        return {
+            "status": "unsupported",
+            "symbol": symbol_db,
+            "exchange": exchange_key,
+            "fetched": 0,
+            "error": str(exc),
+        }
+    except Exception as exc:
+        with session_scope() as db:
+            update_asset_status(
+                db,
+                exchange=exchange_key,
+                symbol=symbol_db,
+                status="backfill_failed",
+                is_supported=True,
+                task_id=getattr(self.request, "id", None),
+                failure_reason=str(exc),
+            )
+        logger.warning("Backfill failed for %s %s: %s", exchange_key, symbol_db, exc)
+        return {
+            "status": "backfill_failed",
+            "symbol": symbol_db,
+            "exchange": exchange_key,
+            "fetched": 0,
+            "error": str(exc),
+        }
     
     if not candles:
-        return {"status": "no_data", "symbol": symbol_db, "fetched": 0}
+        with session_scope() as db:
+            update_asset_status(
+                db,
+                exchange=exchange_key,
+                symbol=symbol_db,
+                status="backfill_failed",
+                row_count=0,
+                task_id=getattr(self.request, "id", None),
+                failure_reason="Exchange returned no candles.",
+            )
+        return {"status": "no_data", "symbol": symbol_db, "exchange": exchange_key, "fetched": 0}
     
     # Store in database with upsert logic
     inserted = 0
     skipped = 0
     
+    latest_ts = None
     with session_scope() as db:
         for row in candles:
             ts = datetime.fromtimestamp(row[0] / 1000, tz=timezone.utc)
+            latest_ts = ts if latest_ts is None or ts > latest_ts else latest_ts
             
             # Check for existing record
             existing = db.query(Price).filter(
@@ -241,6 +362,26 @@ def backfill_historical_candles(
             )
             db.add(price)
             inserted += 1
+
+        total_rows = db.query(Price).filter(
+            Price.exchange == exchange_key,
+            Price.symbol == symbol_db,
+        ).count()
+        latest_ts = db.query(func.max(Price.timestamp)).filter(
+            Price.exchange == exchange_key,
+            Price.symbol == symbol_db,
+        ).scalar()
+        update_asset_status(
+            db,
+            exchange=exchange_key,
+            symbol=symbol_db,
+            status="ready" if total_rows >= 50 else "warming_up",
+            is_supported=True,
+            is_analyzable=True,
+            row_count=total_rows,
+            latest_candle_at=latest_ts,
+            task_id=getattr(self.request, "id", None),
+        )
     
     result = {
         "status": "success",
@@ -258,7 +399,7 @@ def backfill_historical_candles(
 
 @celery_app.task
 def backfill_core_universe(
-    exchange_id: str = "coinbase",
+    exchange_id: str = "auto",
     symbols: Optional[list] = None,
     days: int = 7,
 ):
@@ -285,18 +426,55 @@ def backfill_core_universe(
     logger.info(f"Triggering core backfill for {len(symbols)} symbols")
     
     results = []
+    exchange_key = (exchange_id or "auto").strip().lower()
     for symbol in symbols:
         try:
+            classification = classify_asset(symbol)
+            if not classification.is_analyzable:
+                with session_scope() as db:
+                    update_asset_status(
+                        db,
+                        exchange=exchange_key,
+                        symbol=symbol,
+                        status=classification.status,
+                        is_supported=False,
+                        is_analyzable=False,
+                        failure_reason=classification.reason,
+                    )
+                results.append({"symbol": symbol, "status": classification.status, "reason": classification.reason})
+                continue
+
+            task_symbol = symbol
+            task_exchange = exchange_key
+            if exchange_key == "auto":
+                resolved = asyncio.run(resolve_supported_market(symbol, "auto"))
+                if resolved is None:
+                    with session_scope() as db:
+                        update_asset_status(
+                            db,
+                            exchange="auto",
+                            symbol=symbol,
+                            status="unsupported",
+                            is_supported=False,
+                            is_analyzable=False,
+                            failure_reason="No configured exchange exposes a supported spot market for this symbol.",
+                        )
+                    results.append({"symbol": symbol, "status": "unsupported"})
+                    continue
+                task_symbol = resolved.db_symbol
+                task_exchange = resolved.exchange
+
             result = backfill_historical_candles.delay(
-                symbol=symbol,
-                exchange_id=exchange_id,
+                symbol=task_symbol,
+                exchange_id=task_exchange,
                 days=days,
             )
-            results.append({"symbol": symbol, "task_id": result.id})
+            results.append({"symbol": task_symbol, "exchange": task_exchange, "task_id": result.id})
         except Exception as e:
             results.append({"symbol": symbol, "error": str(e)})
     
-    return {"status": "queued", "count": len(results), "tasks_sample": results[:5]}
+    queued = [item for item in results if item.get("task_id")]
+    return {"status": "queued", "count": len(queued), "tasks_sample": results[:5]}
 
 
 @celery_app.task
@@ -641,6 +819,103 @@ def tick_paper_schedules():
             ran += 1
 
     return {"status": "ok", "ran": ran, "skipped": skipped}
+
+
+@celery_app.task
+def run_crew_research_cycles():
+    from app.config import settings
+    from app.services.crew_autonomy import run_autonomous_research_cycle
+
+    if not settings.CREW_RESEARCH_ENABLED:
+        return {"status": "disabled", "reason": "CREW_RESEARCH_ENABLED is false."}
+
+    results = []
+    with session_scope() as db:
+        profiles = (
+            db.query(AgentGuardrailProfile)
+            .filter(AgentGuardrailProfile.research_enabled.is_(True))
+            .all()
+        )
+        for profile in profiles:
+            user = db.query(User).filter(User.id == profile.user_id).first()
+            if not user:
+                continue
+            try:
+                result = run_autonomous_research_cycle(db, user)
+                results.append({"user_id": user.id, **result})
+            except Exception as exc:
+                logger.exception("Autonomous research cycle failed for user_id=%s", user.id)
+                results.append({"user_id": user.id, "status": "failed", "error": str(exc)})
+    return {"status": "ok", "users": len(results), "results": results}
+
+
+@celery_app.task
+def run_crew_research_cycle_for_user(user_id: int):
+    from app.config import settings
+    from app.services.crew_autonomy import run_autonomous_research_cycle
+
+    if not settings.CREW_RESEARCH_ENABLED:
+        return {"status": "disabled", "reason": "CREW_RESEARCH_ENABLED is false.", "user_id": user_id}
+
+    with session_scope() as db:
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            return {"status": "not_found", "reason": "User not found.", "user_id": user_id}
+        try:
+            return {"user_id": user.id, **run_autonomous_research_cycle(db, user)}
+        except Exception as exc:
+            logger.exception("Immediate autonomous research cycle failed for user_id=%s", user_id)
+            return {"status": "failed", "user_id": user_id, "error": str(exc)}
+
+
+@celery_app.task
+def monitor_crew_triggers():
+    from app.config import settings
+    from app.services.crew_autonomy import monitor_price_triggers
+
+    if not settings.CREW_TRIGGER_MONITOR_ENABLED:
+        return {"status": "disabled", "reason": "CREW_TRIGGER_MONITOR_ENABLED is false."}
+
+    results = []
+    with session_scope() as db:
+        profiles = (
+            db.query(AgentGuardrailProfile)
+            .filter(AgentGuardrailProfile.trigger_monitor_enabled.is_(True))
+            .all()
+        )
+        for profile in profiles:
+            user = db.query(User).filter(User.id == profile.user_id).first()
+            if not user:
+                continue
+            try:
+                result = monitor_price_triggers(db, user)
+                results.append({"user_id": user.id, **result})
+            except Exception as exc:
+                logger.exception("Crew trigger monitor failed for user_id=%s", user.id)
+                results.append({"user_id": user.id, "status": "failed", "error": str(exc)})
+    return {"status": "ok", "users": len(results), "results": results}
+
+
+@celery_app.task
+def sync_exchange_markets_task(exchange_id: str = "kraken"):
+    from app.services.exchange_markets import sync_exchange_markets
+
+    exchange_key = (exchange_id or "kraken").strip().lower()
+    with session_scope() as db:
+        return asyncio.run(sync_exchange_markets(db, exchange=exchange_key))
+
+
+@celery_app.task
+def backfill_kraken_supported_markets(limit: int | None = None, days: int = 7):
+    from app.config import settings
+    from app.services.exchange_markets import queue_kraken_backfills
+
+    with session_scope() as db:
+        return queue_kraken_backfills(
+            db,
+            limit=int(limit or settings.MARKET_UNIVERSE_TARGET),
+            days=days,
+        )
 
 
 

@@ -37,6 +37,11 @@ if settings.AUTO_IMPORT_ENABLED and settings.AUTO_IMPORT_BINANCE_SYMBOLS:
     )
 
 beat_schedule.update({
+    "sync-kraken-markets-daily": {
+        "task": "celery_worker.tasks.sync_exchange_markets_task",
+        "schedule": crontab(hour=1, minute=10),
+        "args": ["kraken"],
+    },
     "backfill-core-hourly": {
         "task": "celery_worker.tasks.backfill_core_universe",
         "schedule": crontab(minute=0),  # Top of every hour
@@ -54,6 +59,18 @@ if settings.PAPER_SCHEDULER_ENABLED:
     beat_schedule["paper-trading-tick"] = {
         "task": "celery_worker.tasks.tick_paper_schedules",
         "schedule": timedelta(seconds=interval),
+    }
+
+if settings.CREW_RESEARCH_ENABLED:
+    beat_schedule["crew-autonomous-research"] = {
+        "task": "celery_worker.tasks.run_crew_research_cycles",
+        "schedule": timedelta(seconds=max(60, settings.CREW_RESEARCH_INTERVAL_SECONDS)),
+    }
+
+if settings.CREW_TRIGGER_MONITOR_ENABLED:
+    beat_schedule["crew-trigger-monitor"] = {
+        "task": "celery_worker.tasks.monitor_crew_triggers",
+        "schedule": timedelta(seconds=max(5, settings.CREW_TRIGGER_POLL_SECONDS)),
     }
 
 if beat_schedule:
