@@ -1,5 +1,6 @@
 import os
 import sys
+import uuid
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,6 +13,7 @@ from sqlalchemy.pool import StaticPool
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.config import settings  # noqa: E402
+from app.auth import create_access_token, get_password_hash  # noqa: E402
 from app.main import create_app, get_coingecko_connector, get_db  # noqa: E402
 from database import Base  # noqa: E402
 import app.models.backtest  # noqa: F401,E402
@@ -20,7 +22,10 @@ import app.models.instrument  # noqa: F401,E402
 import app.models.market  # noqa: F401,E402
 import app.models.paper  # noqa: F401,E402
 import app.models.portfolio  # noqa: F401,E402
+import app.models.research  # noqa: F401,E402
 import app.models.ticks  # noqa: F401,E402
+import app.models.user  # noqa: F401,E402
+from app.models.user import User  # noqa: E402
 
 
 TEST_DATABASE_URL = "sqlite:///:memory:"
@@ -99,3 +104,22 @@ def mock_coingecko_connector():
     mock_connector = MagicMock()
     mock_connector.get_all_coins.return_value = [{"id": "bitcoin", "name": "Bitcoin"}]
     return mock_connector
+
+
+@pytest.fixture
+def test_user(db_session):
+    user = User(
+        email=f"test-{uuid.uuid4().hex[:8]}@example.com",
+        hashed_password=get_password_hash("TestPassword123!"),
+        full_name="Test User",
+    )
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+    return user
+
+
+@pytest.fixture
+def auth_headers(test_user):
+    token = create_access_token({"sub": test_user.email, "user_id": test_user.id})
+    return {"Authorization": f"Bearer {token}"}

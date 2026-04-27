@@ -22,13 +22,14 @@ def _seed_prices(db_session, symbol: str, start: datetime, prices: list[float]) 
     return start + timedelta(minutes=len(prices) - 1)
 
 
-def test_backtest_sma_cross(client, db_session):
+def test_backtest_sma_cross(client, db_session, auth_headers):
     start = datetime(2025, 1, 1, tzinfo=timezone.utc)
     prices = [10, 9, 8, 7, 6, 7, 8, 9, 10, 11, 10, 9, 8]
     end = _seed_prices(db_session, "BTC-USD", start, prices)
 
     resp = client.post(
         "/api/backtests",
+        headers=auth_headers,
         json={
             "symbol": "BTC-USD",
             "exchange": "coinbase",

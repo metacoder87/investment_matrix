@@ -1,10 +1,10 @@
 import uuid
 
-def test_portfolio_lifecycle(client):
+def test_portfolio_lifecycle(client, auth_headers):
     # 1. Create Portfolio
     # Use random name to avoid collision
     pf_name = f"TestFund_{uuid.uuid4().hex[:8]}"
-    res = client.post("/api/portfolio/", json={"name": pf_name})
+    res = client.post("/api/portfolio/", json={"name": pf_name}, headers=auth_headers)
     assert res.status_code == 200, res.text
     data = res.json()
     pf_id = data["id"]
@@ -12,7 +12,7 @@ def test_portfolio_lifecycle(client):
     assert data["total_value"] == 0.0
 
     # 2. Buy BTC (1.0 @ 50000)
-    res = client.post(f"/api/portfolio/{pf_id}/orders", json={
+    res = client.post(f"/api/portfolio/{pf_id}/orders", headers=auth_headers, json={
         "symbol": "BTC-USD",
         "exchange": "coinbase",
         "side": "buy",
@@ -22,7 +22,7 @@ def test_portfolio_lifecycle(client):
     assert res.status_code == 200
 
     # 3. Buy BTC (1.0 @ 60000) -> Avg Entry should be 55000
-    res = client.post(f"/api/portfolio/{pf_id}/orders", json={
+    res = client.post(f"/api/portfolio/{pf_id}/orders", headers=auth_headers, json={
         "symbol": "BTC-USD",
         "exchange": "coinbase",
         "side": "buy",
@@ -32,7 +32,7 @@ def test_portfolio_lifecycle(client):
     assert res.status_code == 200
 
     # 4. Check Holdings
-    res = client.get(f"/api/portfolio/{pf_id}")
+    res = client.get(f"/api/portfolio/{pf_id}", headers=auth_headers)
     assert res.status_code == 200
     portfolio = res.json()
     
@@ -44,7 +44,7 @@ def test_portfolio_lifecycle(client):
     assert btc["avg_entry_price"] == 55000.0
 
     # 5. Sell Partial (0.5 BTC)
-    res = client.post(f"/api/portfolio/{pf_id}/orders", json={
+    res = client.post(f"/api/portfolio/{pf_id}/orders", headers=auth_headers, json={
         "symbol": "BTC-USD",
         "exchange": "coinbase",
         "side": "sell",
@@ -54,7 +54,7 @@ def test_portfolio_lifecycle(client):
     assert res.status_code == 200
 
     # 6. Check Holdings Again
-    res = client.get(f"/api/portfolio/{pf_id}")
+    res = client.get(f"/api/portfolio/{pf_id}", headers=auth_headers)
     portfolio = res.json()
     btc = portfolio["holdings"][0]
     assert btc["quantity"] == 1.5

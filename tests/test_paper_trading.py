@@ -22,13 +22,14 @@ def _seed_prices(db_session, symbol: str, start: datetime, prices: list[float]) 
     return start + timedelta(minutes=len(prices) - 1)
 
 
-def test_paper_trading_step_executes_buy(client, db_session):
+def test_paper_trading_step_executes_buy(client, db_session, auth_headers):
     start = datetime(2025, 1, 2, tzinfo=timezone.utc)
     prices = [10, 9, 8, 7, 6, 7, 8]
     end = _seed_prices(db_session, "ETH-USD", start, prices)
 
     resp = client.post(
         "/api/paper/accounts",
+        headers=auth_headers,
         json={"name": "demo", "cash_balance": 1000.0},
     )
     assert resp.status_code == 200
@@ -36,6 +37,7 @@ def test_paper_trading_step_executes_buy(client, db_session):
 
     step = client.post(
         f"/api/paper/accounts/{account_id}/step",
+        headers=auth_headers,
         json={
             "symbol": "ETH-USD",
             "exchange": "coinbase",
@@ -54,13 +56,14 @@ def test_paper_trading_step_executes_buy(client, db_session):
     assert payload["position"]["quantity"] > 0
 
 
-def test_paper_schedule_run(client, db_session):
+def test_paper_schedule_run(client, db_session, auth_headers):
     start = datetime(2025, 1, 5, tzinfo=timezone.utc)
     prices = [100, 98, 96, 95, 94, 95, 96, 97]
     end = _seed_prices(db_session, "BTC-USD", start, prices)
 
     resp = client.post(
         "/api/paper/accounts",
+        headers=auth_headers,
         json={"name": "schedule-demo", "cash_balance": 5000.0},
     )
     assert resp.status_code == 200
@@ -68,6 +71,7 @@ def test_paper_schedule_run(client, db_session):
 
     schedule_resp = client.post(
         "/api/paper/schedules",
+        headers=auth_headers,
         json={
             "account_id": account_id,
             "symbol": "BTC-USD",
@@ -85,6 +89,7 @@ def test_paper_schedule_run(client, db_session):
 
     run_resp = client.post(
         f"/api/paper/schedules/{schedule_id}/run",
+        headers=auth_headers,
         params={"as_of": end.isoformat()},
     )
     assert run_resp.status_code == 200

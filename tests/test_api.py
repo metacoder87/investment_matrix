@@ -36,7 +36,7 @@ def test_start_price_ingestion(mock_send_task, client):
     mock_send_task.assert_called_once_with(
         "celery_worker.tasks.ingest_historical_data",
         args=["BTC/USDT", "1m", 100],
-        kwargs={"exchange_id": "binance"},
+        kwargs={"exchange_id": "kraken"},
     )
 
 
