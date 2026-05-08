@@ -6,4 +6,75 @@
   body {
     @apply bg-background text-white bg-app-gradient min-h-screen selection:bg-primary selection:text-background;
   }
+
+  /* Subtle CRT scanline overlay applied via .crt-overlay rather than globally */
+}
+
+@layer components {
+  /* Card surface used across dashboard and panels */
+  .neo-card {
+    @apply relative overflow-hidden rounded-lg border border-white/10 bg-surface/60 backdrop-blur-sm;
+  }
+
+  .neo-card::after {
+    content: "";
+    @apply pointer-events-none absolute inset-0 opacity-30;
+    background-image: repeating-linear-gradient(
+      180deg,
+      rgba(0, 245, 255, 0.035) 0px,
+      rgba(0, 245, 255, 0.035) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+  }
+
+  .neo-card-active {
+    @apply animate-neon-pulse border-accent/60;
+  }
+
+  .neon-text {
+    text-shadow: 0 0 6px rgba(0, 245, 255, 0.55), 0 0 18px rgba(0, 245, 255, 0.25);
+  }
+
+  .neon-text-green {
+    text-shadow: 0 0 6px rgba(57, 255, 20, 0.65), 0 0 16px rgba(57, 255, 20, 0.3);
+  }
+
+  /* Subtle moving shimmer on the top edge of KPI cards */
+  .kpi-shimmer::before {
+    content: "";
+    @apply pointer-events-none absolute inset-x-0 top-0 h-px;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(0, 245, 255, 0.6),
+      transparent
+    );
+  }
+
+  /* Matrix-rain canvas helper: stays behind everything */
+  .matrix-rain-bg {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+  }
+}
+
+@layer utilities {
+  .text-shadow-none {
+    text-shadow: none;
+  }
+
+  .scrollbar-thin-cyan::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin-cyan::-webkit-scrollbar-thumb {
+    background: rgba(0, 245, 255, 0.35);
+    border-radius: 9999px;
+  }
+  .scrollbar-thin-cyan::-webkit-scrollbar-track {
+    background: transparent;
+  }
 }
