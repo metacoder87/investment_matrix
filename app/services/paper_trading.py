@@ -6,7 +6,13 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.backtesting.execution import ExecutionSettings, compute_buy_fill, compute_sell_fill
+from app.backtesting.execution import (
+    ExecutionSettings,
+    compute_buy_fill,
+    compute_sell_fill,
+    compute_short_cover_fill,
+    compute_short_open_fill,
+)
 from app.backtesting.strategies import SignalAction, create_strategy
 from app.models.paper import (
     PaperAccount,
@@ -70,15 +76,16 @@ def execute_paper_step(
         .filter(PaperPosition.account_id == account.id)
         .all()
     )
-    position = next(
-        (pos for pos in positions if pos.symbol == symbol_key and pos.exchange == exchange_key),
+    long_position = next(
+        (pos for pos in positions if pos.symbol == symbol_key and pos.exchange == exchange_key and (pos.side or "long") == "long"),
+        None,
+    )
+    short_position = next(
+        (pos for pos in positions if pos.symbol == symbol_key and pos.exchange == exchange_key and (pos.side or "long") == "short"),
         None,
     )
 
-    equity = account.cash_balance
-    for pos in positions:
-        mark_price = price if pos.symbol == symbol_key else pos.last_price
-        equity += pos.quantity * mark_price
+    equity = _account_equity(positions, float(account.cash_balance or 0.0), symbol_key, price)
 
     execution = ExecutionSettings(
         fee_rate=account.fee_rate,
@@ -87,15 +94,17 @@ def execute_paper_step(
     )
 
     order_payload = None
-    if signal == SignalAction.BUY and (position is None or position.quantity <= 0):
+    position = long_position or short_position
+    if signal == SignalAction.BUY and (long_position is None or long_position.quantity <= 0):
         fill = compute_buy_fill(account.cash_balance, equity, price, execution)
         if fill:
             account.cash_balance += fill.cash_delta
-            if position is None:
+            if long_position is None:
                 position = PaperPosition(
                     account_id=account.id,
                     exchange=exchange_key,
                     symbol=symbol_key,
+                    side="long",
                     quantity=fill.quantity,
                     avg_entry_price=fill.price,
                     last_price=price,
@@ -103,9 +112,10 @@ def execute_paper_step(
                 db.add(position)
                 positions.append(position)
             else:
-                position.quantity = fill.quantity
-                position.avg_entry_price = fill.price
-                position.last_price = price
+                long_position.quantity = fill.quantity
+                long_position.avg_entry_price = fill.price
+                long_position.last_price = price
+                position = long_position
 
             order = PaperOrder(
                 account_id=account.id,
@@ -125,8 +135,9 @@ def execute_paper_step(
         else:
             order_payload = {"status": PaperOrderStatus.REJECTED.value, "reason": "insufficient_cash"}
 
-    elif signal == SignalAction.SELL and position is not None and position.quantity > 0:
-        fill = compute_sell_fill(position.quantity, price, execution)
+    elif signal == SignalAction.SELL and long_position is not None and long_position.quantity > 0:
+        position = long_position
+        fill = compute_sell_fill(long_position.quantity, price, execution)
         if fill:
             account.cash_balance += fill.cash_delta
             order = PaperOrder(
@@ -144,10 +155,84 @@ def execute_paper_step(
             db.add(order)
             db.flush()
             order_payload = _order_payload(order)
-            position.quantity = 0.0
-            position.last_price = price
+            long_position.quantity = 0.0
+            long_position.last_price = price
         else:
             order_payload = {"status": PaperOrderStatus.REJECTED.value, "reason": "invalid_fill"}
+
+    elif signal == SignalAction.SHORT and (short_position is None or short_position.quantity <= 0):
+        fill = compute_short_open_fill(account.cash_balance, equity, price, execution)
+        if fill:
+            account.cash_balance += fill.cash_delta
+            if short_position is None:
+                position = PaperPosition(
+                    account_id=account.id,
+                    exchange=exchange_key,
+                    symbol=symbol_key,
+                    side="short",
+                    quantity=fill.quantity,
+                    avg_entry_price=fill.price,
+                    last_price=price,
+                    reserved_collateral=fill.notional,
+                )
+                db.add(position)
+                positions.append(position)
+            else:
+                short_position.quantity = fill.quantity
+                short_position.avg_entry_price = fill.price
+                short_position.last_price = price
+                short_position.reserved_collateral = fill.notional
+                position = short_position
+
+            order = PaperOrder(
+                account_id=account.id,
+                exchange=exchange_key,
+                symbol=symbol_key,
+                side=PaperOrderSide.SHORT,
+                status=PaperOrderStatus.FILLED,
+                price=fill.price,
+                quantity=fill.quantity,
+                fee=fill.fee,
+                strategy=strategy.name,
+                reason="signal",
+            )
+            db.add(order)
+            db.flush()
+            order_payload = _order_payload(order)
+        else:
+            order_payload = {"status": PaperOrderStatus.REJECTED.value, "reason": "insufficient_cash"}
+
+    elif signal == SignalAction.COVER and short_position is not None and short_position.quantity > 0:
+        position = short_position
+        fill = compute_short_cover_fill(
+            short_position.quantity,
+            short_position.avg_entry_price,
+            short_position.reserved_collateral or 0.0,
+            price,
+            execution,
+        )
+        if fill:
+            account.cash_balance += fill.cash_delta
+            order = PaperOrder(
+                account_id=account.id,
+                exchange=exchange_key,
+                symbol=symbol_key,
+                side=PaperOrderSide.COVER,
+                status=PaperOrderStatus.FILLED,
+                price=fill.price,
+                quantity=fill.quantity,
+                fee=fill.fee,
+                strategy=strategy.name,
+                reason="signal",
+            )
+            db.add(order)
+            db.flush()
+            order_payload = _order_payload(order)
+            short_position.quantity = 0.0
+            short_position.last_price = price
+            short_position.reserved_collateral = 0.0
+        else:
+            order_payload = {"status": PaperOrderStatus.REJECTED.value, "reason": "invalid_cover_fill"}
 
     if position is not None and position.quantity <= 0:
         if position in positions:
@@ -160,9 +245,7 @@ def execute_paper_step(
     else:
         position_payload = None
 
-    equity_total = account.cash_balance + sum(
-        p.quantity * (price if p.symbol == symbol_key else p.last_price) for p in positions
-    )
+    equity_total = _account_equity(positions, float(account.cash_balance or 0.0), symbol_key, price)
 
     account.last_signal = signal.value
     account.last_step_at = end_dt
@@ -207,8 +290,25 @@ def _position_payload(position: PaperPosition) -> dict[str, Any]:
     return {
         "symbol": position.symbol,
         "exchange": position.exchange,
+        "side": position.side or "long",
         "quantity": position.quantity,
         "avg_entry_price": position.avg_entry_price,
         "last_price": position.last_price,
+        "reserved_collateral": position.reserved_collateral or 0.0,
+        "take_profit": position.take_profit,
+        "stop_loss": position.stop_loss,
         "updated_at": position.updated_at.isoformat() if position.updated_at else None,
     }
+
+
+def _account_equity(positions: list[PaperPosition], cash: float, symbol_key: str, mark_price: float) -> float:
+    equity = cash
+    for pos in positions:
+        price = mark_price if pos.symbol == symbol_key else float(pos.last_price or 0.0)
+        qty = float(pos.quantity or 0.0)
+        if (pos.side or "long") == "short":
+            entry = float(pos.avg_entry_price or 0.0)
+            equity += float(pos.reserved_collateral or 0.0) + (entry - price) * qty
+        else:
+            equity += qty * price
+    return equity

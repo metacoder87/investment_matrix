@@ -11,6 +11,46 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.research import AgentGuardrailProfile, AgentModelInvocation
 from app.models.user import User
+from app.services.crew_formula_decisions import deterministic_runtime_payload
+
+
+def _sanitize_llm_json(raw: str) -> str:
+    """Aggressively clean LLM output so json.loads() can parse it.
+
+    Handles three common failure modes from local models:
+    1. Markdown fences:  ```json ... ``` or ```...```
+    2. Invalid control characters (e.g. \\x00-\\x1f except tab/newline/cr)
+    3. Inline // comments that some models hallucinate
+    4. Leading/trailing prose before/after the JSON object
+    """
+    if not raw or not raw.strip():
+        raise ValueError("Ollama returned an empty or whitespace-only response.")
+
+    text = raw
+
+    # Strip markdown code fences (```json ... ``` or ``` ... ```)
+    fence_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', text, re.DOTALL)
+    if fence_match:
+        text = fence_match.group(1)
+
+    # Remove inline // comments (not inside strings — best-effort)
+    text = re.sub(r'(?m)//.*$', '', text)
+
+    # Strip control characters that are invalid in JSON (keep \t \n \r)
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+
+    # If the model wrapped the JSON in prose, try to extract the outermost { ... }
+    text = text.strip()
+    if not text.startswith('{'):
+        brace_start = text.find('{')
+        if brace_start != -1:
+            text = text[brace_start:]
+    if not text.endswith('}'):
+        brace_end = text.rfind('}')
+        if brace_end != -1:
+            text = text[:brace_end + 1]
+
+    return text.strip()
 
 
 MODEL_ROUTE_FIELDS = {
@@ -133,32 +173,32 @@ def ollama_models() -> dict[str, Any]:
 
 
 def runtime_payload(profile: AgentGuardrailProfile | None = None, *, role: str = "default") -> dict[str, Any]:
+    formula_payload = deterministic_runtime_payload()
+    formula_payload["model_routing"] = model_routing_payload(profile)
+    formula_payload["ai_notes_enabled"] = bool(settings.CREW_ENABLED)
     if not settings.CREW_ENABLED:
-        return {
+        formula_payload["ai_notes_runtime"] = {
             "enabled": False,
-            "provider": settings.CREW_LLM_PROVIDER,
-            "base_url": settings.CREW_LLM_BASE_URL,
-            "model": effective_model(profile, role),
-            "selected_model": effective_model(profile, role),
             "available": False,
             "status": "disabled",
-            "message": "Crew runtime is disabled. Set CREW_ENABLED=true and configure Ollama to run agent cycles.",
-            "model_available": None,
-            "model_routing": model_routing_payload(profile),
+            "message": "AI notes are disabled. Formula trading remains available.",
         }
-    payload = ollama_models()
+        return formula_payload
+
+    ai_payload = ollama_models()
     model = effective_model(profile, role)
-    payload["model"] = model
-    payload["selected_model"] = model
-    payload["model_routing"] = model_routing_payload(profile)
-    if payload["available"]:
-        names = {item["name"] for item in payload["models"]}
-        payload["model_available"] = model in names if names else None
+    ai_payload["model"] = model
+    ai_payload["selected_model"] = model
+    ai_payload["model_routing"] = model_routing_payload(profile)
+    if ai_payload["available"]:
+        names = {item["name"] for item in ai_payload["models"]}
+        ai_payload["model_available"] = model in names if names else None
         if names and model not in names:
-            payload["status"] = "model_missing"
-            payload["available"] = False
-            payload["message"] = f"Selected model {model} is not downloaded in Ollama."
-    return payload
+            ai_payload["status"] = "model_missing"
+            ai_payload["available"] = False
+            ai_payload["message"] = f"Selected model {model} is not downloaded in Ollama."
+    formula_payload["ai_notes_runtime"] = ai_payload
+    return formula_payload
 
 
 def ensure_model_exists(model: str, models_payload: dict[str, Any] | None = None) -> None:
@@ -267,7 +307,12 @@ def invoke_ollama_json(
     temperature: float = 0.1,
     metadata: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str, AgentModelInvocation]:
-    timeout_value = int(timeout_seconds or max(10, settings.CREW_LLM_TIMEOUT_SECONDS))
+    # Use at least the configured CREW_LLM_TIMEOUT_SECONDS (default 600s).
+    # Split into (connect, read) so large models (70B) get enough read time
+    # without making the connect phase wait forever too.
+    read_timeout = int(timeout_seconds or max(60, settings.CREW_LLM_TIMEOUT_SECONDS))
+    connect_timeout = min(30, read_timeout)  # TCP connect should be fast
+    timeout_value = read_timeout  # logged in the invocation record
     invocation = start_model_invocation(
         db,
         current_user,
@@ -293,17 +338,17 @@ def invoke_ollama_json(
                 "format": "json",
                 "options": {"temperature": temperature},
             },
-            timeout=timeout_value,
+            timeout=(connect_timeout, read_timeout),
         )
         response.raise_for_status()
         raw = response.json().get("response")
-        if not raw:
+        if not raw or not raw.strip():
             raise ValueError("Ollama returned an empty JSON response.")
-        
-        # Pre-process raw string to aggressively strip out hallucinated inline comments
-        raw = re.sub(r'(?m)//.*$', '', raw)
-        
-        parsed = json.loads(raw)
+
+        # Sanitize the raw LLM output: strip control chars, markdown fences,
+        # inline comments, and leading/trailing prose.
+        sanitized = _sanitize_llm_json(raw)
+        parsed = json.loads(sanitized)
         if not isinstance(parsed, dict):
             raise ValueError("Ollama JSON response must be an object.")
         complete_model_invocation(
@@ -326,6 +371,7 @@ def invoke_ollama_json(
             status = "invalid_response"
         complete_model_invocation(db, invocation, status=status, error_message=str(exc))
         raise
+
 
 
 def mark_invocation_validation_failed(db: Session, invocation: AgentModelInvocation, error: str) -> None:

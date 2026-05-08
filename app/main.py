@@ -811,6 +811,11 @@ def create_app() -> FastAPI:
         epoch = int(dt.timestamp() // bucket_seconds) * bucket_seconds
         return datetime.fromtimestamp(epoch, tz=timezone.utc)
 
+    def _is_recent_rollup_window(end_dt: datetime) -> bool:
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - end_dt <= timedelta(minutes=5)
+
     def _query_agg_series(
         db: Session,
         *,
@@ -1244,9 +1249,33 @@ def create_app() -> FastAPI:
         bucket_seconds = max(requested_bucket_seconds, _choose_bucket_seconds(range_seconds, max_points))
 
         candles: list[dict] = []
+        source_used = "none"
+        data_resolution = "none"
         dialect = db.get_bind().dialect.name
         asset_id = _resolve_asset_id(db, exchange, symbol)
-        if dialect == "postgresql" and asset_id:
+        if dialect == "postgresql" and asset_id and not _is_recent_rollup_window(end_dt):
+            for view_name, view_bucket in (
+                ("ticks_5m", 300),
+                ("ticks_1m", 60),
+            ):
+                if bucket_seconds < view_bucket:
+                    continue
+                candles, candidate_bucket = _query_agg_candles(
+                    db,
+                    asset_id=asset_id,
+                    start_dt=start_dt,
+                    end_dt=end_dt,
+                    bucket_seconds=bucket_seconds,
+                    view_name=view_name,
+                    view_bucket_seconds=view_bucket,
+                )
+                if candles:
+                    bucket_seconds = candidate_bucket
+                    source_used = view_name
+                    data_resolution = "timescale_tick_rollup"
+                    break
+
+        if not candles and dialect == "postgresql" and asset_id:
             bucket_interval = f"{bucket_seconds} seconds"
             sql = text(
                 """
@@ -1301,6 +1330,9 @@ def create_app() -> FastAPI:
                             "trades": int(trades) if trades is not None else 0,
                         }
                     )
+                if candles:
+                    source_used = "ticks"
+                    data_resolution = "raw_ticks"
             except Exception:
                 candles = []
 
@@ -1322,6 +1354,8 @@ def create_app() -> FastAPI:
                 )
                 if candles:
                     bucket_seconds = candidate_bucket
+                    source_used = view_name
+                    data_resolution = "timescale_tick_rollup"
                     break
 
         if not candles and dialect == "postgresql":
@@ -1381,6 +1415,9 @@ def create_app() -> FastAPI:
                             "trades": int(trades) if trades is not None else 0,
                         }
                     )
+                if candles:
+                    source_used = "market_trades"
+                    data_resolution = "compatibility_trades"
             except Exception:
                 candles = []
 
@@ -1427,6 +1464,9 @@ def create_app() -> FastAPI:
 
             for bucket_epoch in sorted(buckets.keys()):
                 candles.append(buckets[bucket_epoch])
+            if candles:
+                source_used = "ticks"
+                data_resolution = "raw_ticks"
 
         if not candles:
             rows = (
@@ -1472,6 +1512,9 @@ def create_app() -> FastAPI:
 
             for bucket_epoch in sorted(buckets.keys()):
                 candles.append(buckets[bucket_epoch])
+            if candles:
+                source_used = "market_trades"
+                data_resolution = "compatibility_trades"
 
         # Fallback: query the prices table (used by backfill) if no data in market_trades
         if not candles:
@@ -1521,6 +1564,9 @@ def create_app() -> FastAPI:
 
             for bucket_epoch in sorted(buckets.keys()):
                 candles.append(buckets[bucket_epoch])
+            if candles:
+                source_used = "prices"
+                data_resolution = "ohlcv_candles"
 
         backfill_status = None
         if not candles and _should_enqueue_celery():
@@ -1546,6 +1592,8 @@ def create_app() -> FastAPI:
             "timeframe": timeframe,
             "requested_bucket_seconds": requested_bucket_seconds,
             "bucket_seconds": bucket_seconds,
+            "source": source_used,
+            "data_resolution": data_resolution,
             "candles": candles,
             "backfill": backfill_status,
         }

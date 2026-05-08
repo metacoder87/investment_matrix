@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -11,9 +12,13 @@ from app.models.instrument import Price
 from app.models.research import AssetDataStatus, ExchangeMarket
 from app.redis_client import redis_client
 from app.services.asset_status import build_signal_status
+from app.services.data_sources import list_data_sources, sync_all_exchange_markets
 from app.services.exchange_markets import list_market_assets, queue_kraken_backfills, sync_exchange_markets
+from app.services.ingestion_telemetry import collect_ingestion_telemetry
+from app.services.market_activation import activate_market_coverage, tiered_coverage_summary
 from app.services.market_resolution import normalize_db_symbol
 from app.services.price_selection import resolve_price_exchange
+from app.services.stream_allocator import allocate_stream_targets, list_stream_targets, set_stream_preferences
 from app.signals.engine import SignalEngine
 from database import get_db
 
@@ -21,6 +26,12 @@ from database import get_db
 router = APIRouter(prefix="/research", tags=["Research"])
 ops_router = APIRouter(prefix="/operations", tags=["Operations"])
 market_router = APIRouter(prefix="/market", tags=["Market"])
+
+
+class StreamPreferenceRequest(BaseModel):
+    symbols: list[str] = Field(default_factory=list)
+    preference: str = Field(pattern="^(neutral|locked|boosted|blocked)$")
+    exchange: str | None = None
 
 
 @router.get("/assets/{exchange}/{symbol:path}")
@@ -174,6 +185,7 @@ async def get_market_operations_status(db: Session = Depends(get_db)) -> dict:
         .group_by(AssetDataStatus.exchange)
         .all()
     }
+    tiered_coverage = tiered_coverage_summary(db)
 
     return {
         "celery_queue_depth": queue_depth,
@@ -183,6 +195,7 @@ async def get_market_operations_status(db: Session = Depends(get_db)) -> dict:
         "discovered_by_exchange": discovered_by_exchange,
         "analyzable_by_exchange": analyzable_by_exchange,
         "active_backfills_by_exchange": active_backfills,
+        "tiered_coverage": tiered_coverage,
         "latest_candle_at": latest_candle_at.isoformat() if latest_candle_at else None,
         "latest_success": _status_summary(latest_success),
         "recent_failures": [_status_summary(row) for row in recent_failures],
@@ -215,6 +228,30 @@ async def sync_kraken_markets(db: Session = Depends(get_db)) -> dict:
     return result
 
 
+@ops_router.post("/market/sync-all")
+async def sync_all_markets(db: Session = Depends(get_db)) -> dict:
+    result = await sync_all_exchange_markets(db)
+    db.commit()
+    return result
+
+
+@ops_router.post("/market/activate-coverage")
+def activate_market_coverage_endpoint(
+    queue_work: bool = Query(default=True, description="Queue bounded REST/OHLCV work for activated targets."),
+    limit: int | None = Query(default=None, ge=1, le=50000),
+    queue_limit: int | None = Query(default=None, ge=0, le=5000),
+    db: Session = Depends(get_db),
+) -> dict:
+    result = activate_market_coverage(
+        db,
+        queue_work=queue_work,
+        limit=limit,
+        queue_limit=queue_limit,
+    )
+    db.commit()
+    return result
+
+
 @ops_router.post("/market/backfill-kraken")
 def backfill_kraken_markets(
     limit: int = Query(default=500, ge=1, le=5000),
@@ -224,6 +261,58 @@ def backfill_kraken_markets(
     result = queue_kraken_backfills(db, limit=limit, days=days)
     db.commit()
     return result
+
+
+@ops_router.get("/data-sources")
+def get_data_sources(
+    refresh: bool = Query(default=False, description="Sample Redis/Timescale telemetry before returning source health."),
+    db: Session = Depends(get_db),
+) -> dict:
+    telemetry = None
+    if refresh:
+        telemetry = asyncio.run(collect_ingestion_telemetry(db))
+        db.commit()
+    items = list_data_sources(db)
+    db.commit()
+    payload = {"items": items, "count": len(items)}
+    if telemetry:
+        payload["telemetry"] = telemetry
+    return payload
+
+
+@ops_router.get("/stream-targets")
+def get_stream_targets(
+    status: str | None = Query(default=None, pattern="^(active|candidate|blocked)$"),
+    coverage_tier: str | None = Query(default=None, pattern="^(tick_stream|quote_stream|rest_gap_fill|ohlcv_only|dex_context_only|blocked)$"),
+    exchange: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+    refresh: bool = Query(default=False, description="Recalculate target scores before returning results."),
+    db: Session = Depends(get_db),
+) -> dict:
+    allocation = None
+    if refresh:
+        allocation = allocate_stream_targets(db, publish_commands=False)
+        db.commit()
+    payload = list_stream_targets(db, status=status, coverage_tier=coverage_tier, exchange=exchange, limit=limit)
+    if allocation:
+        payload["allocation"] = allocation
+    return payload
+
+
+@ops_router.post("/stream-targets/preferences")
+def update_stream_target_preferences(payload: StreamPreferenceRequest, db: Session = Depends(get_db)) -> dict:
+    try:
+        result = set_stream_preferences(
+            db,
+            symbols=payload.symbols,
+            preference=payload.preference,
+            exchange=payload.exchange,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    allocation = allocate_stream_targets(db, publish_commands=False)
+    db.commit()
+    return {**result, "allocation": allocation}
 
 
 def _status_summary(row: AssetDataStatus | None) -> dict | None:

@@ -59,9 +59,13 @@ class PaperStepRequest(BaseModel):
 class PaperPositionResponse(BaseModel):
     symbol: str
     exchange: str
+    side: str = "long"
     quantity: float
     avg_entry_price: float
     last_price: float
+    reserved_collateral: float = 0.0
+    take_profit: Optional[float] = None
+    stop_loss: Optional[float] = None
     updated_at: Optional[datetime] = None
 
 
@@ -241,9 +245,13 @@ def list_positions(
         PaperPositionResponse(
             symbol=position.symbol,
             exchange=position.exchange,
+            side=position.side or "long",
             quantity=position.quantity,
             avg_entry_price=position.avg_entry_price,
             last_price=position.last_price,
+            reserved_collateral=position.reserved_collateral or 0.0,
+            take_profit=position.take_profit,
+            stop_loss=position.stop_loss,
             updated_at=position.updated_at,
         )
         for position in positions

@@ -7,7 +7,7 @@ from unittest.mock import patch
 from app.models.instrument import Coin, Price
 from app.models.paper import PaperAccount, PaperOrder
 from app.models.research import AgentGuardrailProfile, AgentRecommendation, AgentRun, AssetDataStatus
-from app.services.crew_runner import AgentDecision
+from app.services.crew_formula_decisions import update_formula_config
 from app.signals.engine import Signal, SignalType
 from celery_worker.tasks import backfill_historical_candles
 
@@ -268,24 +268,38 @@ def test_crew_runtime_disabled_is_clear(client, auth_headers, monkeypatch):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["enabled"] is False
-    assert payload["status"] == "disabled"
+    assert payload["enabled"] is True
+    assert payload["provider"] == "formula"
+    assert payload["status"] == "available"
+    assert payload["ai_notes_enabled"] is False
+    assert payload["ai_notes_runtime"]["status"] == "disabled"
 
 
-def test_crew_run_disabled_returns_failed_setup_state(client, db_session, auth_headers, monkeypatch):
+def test_crew_run_does_not_require_optional_ai_notes(client, db_session, test_user, auth_headers, monkeypatch):
+    _seed_recent_prices(db_session, count=260)
+    update_formula_config(
+        db_session,
+        test_user,
+        parameters={"entry_score_floor": 0.1, "long": {"entry_threshold": 0.1}, "short": {"entry_threshold": 0.1}},
+    )
+    db_session.commit()
     monkeypatch.setattr("app.services.crew_runner.settings.CREW_ENABLED", False)
 
-    response = client.post("/api/crew/runs", headers=auth_headers, json={"symbols": ["BTC-USD"], "max_symbols": 1})
+    with patch("app.services.crew_runner.OllamaCrewClient.generate_decision") as mocked:
+        response = client.post("/api/crew/runs", headers=auth_headers, json={"symbols": ["BTC-USD"], "max_symbols": 1})
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["status"] == "failed"
-    assert "disabled" in payload["error_message"].lower()
+    assert payload["status"] == "completed"
+    assert payload["summary"]["runtime"]["provider"] == "formula"
+    assert payload["recommendations"]
+    mocked.assert_not_called()
     assert db_session.query(AgentRun).count() == 1
 
 
-def test_crew_run_rejects_malformed_agent_output(client, db_session, test_user, auth_headers, monkeypatch):
+def test_crew_run_formula_rejection_never_calls_agent_output(client, db_session, test_user, auth_headers, monkeypatch):
     _seed_recent_prices(db_session)
+    update_formula_config(db_session, test_user, parameters={"entry_score_floor": 0.95})
     db_session.commit()
 
     monkeypatch.setattr(
@@ -301,18 +315,24 @@ def test_crew_run_rejects_malformed_agent_output(client, db_session, test_user, 
         },
     )
 
-    with patch("app.services.crew_runner.OllamaCrewClient.generate_decision", side_effect=ValueError("bad json")):
+    with patch("app.services.crew_runner.OllamaCrewClient.generate_decision") as mocked:
         response = client.post("/api/crew/runs", headers=auth_headers, json={"symbols": ["BTC-USD"], "max_symbols": 1})
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "completed"
     assert payload["recommendations"] == []
-    assert any(event["event_type"] == "agent_output_rejected" for event in payload["audit"])
+    assert any(event["event_type"] == "formula_decision_rejected" for event in payload["audit"])
+    mocked.assert_not_called()
 
 
 def test_crew_run_creates_prediction_backtest_and_guarded_paper_trade(client, db_session, test_user, auth_headers, monkeypatch):
     _seed_recent_prices(db_session, count=260)
+    update_formula_config(
+        db_session,
+        test_user,
+        parameters={"entry_score_floor": 0.1, "long": {"entry_threshold": 0.1}, "short": {"entry_threshold": 0.1}},
+    )
     account = PaperAccount(
         user_id=test_user.id,
         name="Crew Paper",
@@ -330,6 +350,7 @@ def test_crew_run_creates_prediction_backtest_and_guarded_paper_trade(client, db
         min_data_freshness_seconds=86400,
         min_backtest_return_pct=-100.0,
         min_backtest_sharpe=-1_000_000.0,
+        trade_cadence_mode="standard",
         allowed_symbols=[],
     )
     db_session.add_all([account, guardrails])
@@ -348,19 +369,8 @@ def test_crew_run_creates_prediction_backtest_and_guarded_paper_trade(client, db
             "message": "ok",
         },
     )
-    decision = AgentDecision(
-        action="buy",
-        confidence=0.82,
-        thesis="Momentum is oversold enough for a supervised paper entry.",
-        risk_notes="Paper trade only; validate drawdown.",
-        strategy_name="rsi",
-        strategy_params={"length": 2, "buy_threshold": 100.0, "sell_threshold": 101.0},
-        prediction_summary="Small mean-reversion bounce expected.",
-        prediction_horizon_minutes=240,
-        predicted_path=[{"minutes_ahead": 240, "price": 190}],
-    )
 
-    with patch("app.services.crew_runner.OllamaCrewClient.generate_decision", return_value=decision):
+    with patch("app.services.crew_runner.OllamaCrewClient.generate_decision") as mocked:
         response = client.post(
             "/api/crew/runs",
             headers=auth_headers,
@@ -380,3 +390,4 @@ def test_crew_run_creates_prediction_backtest_and_guarded_paper_trade(client, db
     assert recommendation.status == "executed", recommendation.execution_reason
     assert db_session.query(PaperOrder).count() == 1
     assert any(event["event_type"] == "paper_trade_executed" for event in payload["audit"])
+    mocked.assert_not_called()

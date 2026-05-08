@@ -21,7 +21,7 @@ from app.models.research import (
 )
 from app.models.user import User
 from app.routers.auth import get_current_user
-from app.models.paper import PaperAccount
+from app.models.paper import PaperAccount, PaperPosition
 from app.services.crew_autonomy import dry_run_research_thesis, theses_payload, update_thesis
 from app.services.crew_execution import (
     attempt_autonomous_execution,
@@ -29,6 +29,16 @@ from app.services.crew_execution import (
     get_or_create_guardrails,
     guardrail_payload,
     recommendation_payload,
+)
+from app.services.crew_formula_decisions import (
+    FORMULA_ENGINE_MODEL,
+    approve_formula_suggestion,
+    formula_config_payload,
+    formula_suggestion_payload,
+    get_or_create_formula_config,
+    list_formula_suggestions,
+    reject_formula_suggestion,
+    update_formula_config,
 )
 from app.services.crew_portfolio import (
     ai_orders,
@@ -107,6 +117,8 @@ class RecommendationCreate(BaseModel):
     symbol: str
     exchange: str = Field(default_factory=lambda: settings.PRIMARY_EXCHANGE)
     action: str
+    side: str = "long"
+    sleeve: Optional[str] = None
     confidence: float = Field(ge=0, le=1)
     thesis: str
     risk_notes: Optional[str] = None
@@ -120,6 +132,11 @@ class RecommendationCreate(BaseModel):
     evidence: dict[str, Any] = Field(default_factory=dict)
     backtest_summary: dict[str, Any] = Field(default_factory=dict)
     strategy_params: dict[str, Any] = Field(default_factory=dict)
+    entry_score: Optional[float] = None
+    exit_score: Optional[float] = None
+    formula_inputs: dict[str, Any] = Field(default_factory=dict)
+    formula_outputs: dict[str, Any] = Field(default_factory=dict)
+    strategy_version: Optional[str] = None
     auto_execute: bool = False
 
 
@@ -130,6 +147,8 @@ class RecommendationResponse(BaseModel):
     symbol: str
     exchange: str
     action: str
+    side: str = "long"
+    sleeve: Optional[str] = None
     confidence: float
     thesis: str
     risk_notes: Optional[str] = None
@@ -149,6 +168,11 @@ class RecommendationResponse(BaseModel):
     llm_model: Optional[str] = None
     trade_decision_model: Optional[str] = None
     trade_decision_status: Optional[str] = None
+    entry_score: Optional[float] = None
+    exit_score: Optional[float] = None
+    formula_inputs: dict[str, Any] = Field(default_factory=dict)
+    formula_outputs: dict[str, Any] = Field(default_factory=dict)
+    strategy_version: Optional[str] = None
     created_at: Optional[datetime] = None
 
 
@@ -205,6 +229,18 @@ class ModelTestRequest(BaseModel):
 
 class ResearchDryRunRequest(BaseModel):
     symbol: Optional[str] = None
+
+
+class ResearchRunNowRequest(BaseModel):
+    max_symbols: Optional[int] = Field(default=None, ge=1, le=10)
+    execute_immediate: bool = True
+
+
+class FormulaConfigUpdate(BaseModel):
+    name: Optional[str] = None
+    authority_mode: Optional[str] = Field(default=None, pattern="^(approval_required|auto_apply_bounded)$")
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    bounds: Optional[dict[str, Any]] = None
 
 
 @router.get("/runtime")
@@ -296,6 +332,7 @@ def test_crew_model(
 
 @router.post("/research/run-now")
 def run_research_now(
+    payload: ResearchRunNowRequest | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict:
@@ -305,20 +342,15 @@ def run_research_now(
         raise HTTPException(status_code=409, detail=runtime.get("message", "Crew runtime is not ready."))
     if not settings.CREW_RESEARCH_ENABLED or not profile.research_enabled:
         raise HTTPException(status_code=409, detail="Research is disabled globally or paused for this user.")
-    task = celery_app.send_task("celery_worker.tasks.run_crew_research_cycle_for_user", args=[current_user.id])
-    trace_event(
+    max_symbols = _default_run_now_symbols(profile, payload.max_symbols if payload else None)
+    return _queue_research_task(
         db,
         current_user,
-        event_type="research_queued",
-        status="running",
-        public_summary="Immediate research cycle queued from the Crew dashboard.",
-        role="Market Data Auditor",
-        evidence={"task_id": task.id, "model_routing": model_routing_payload(profile)},
-        model_role="thesis",
-        llm_model=effective_model(profile, "thesis"),
+        profile,
+        max_symbols=max_symbols,
+        execute_immediate=payload.execute_immediate if payload else True,
+        source="Crew dashboard",
     )
-    db.commit()
-    return {"status": "queued", "task_id": task.id, "model_routing": model_routing_payload(profile)}
 
 
 @router.post("/research/dry-run")
@@ -421,6 +453,113 @@ def get_model_performance(
     return sorted(results, key=lambda item: (item["role"], item["model"]))
 
 
+@router.get("/formula-config")
+def get_formula_config(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    config = get_or_create_formula_config(db, current_user)
+    db.commit()
+    return formula_config_payload(config)
+
+
+@router.patch("/formula-config")
+def patch_formula_config(
+    payload: FormulaConfigUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    try:
+        config = update_formula_config(
+            db,
+            current_user,
+            name=payload.name,
+            authority_mode=payload.authority_mode,
+            parameters=payload.parameters if payload.parameters else None,
+            bounds=payload.bounds,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    audit(db, current_user, "formula_config_updated", {"formula_config": formula_config_payload(config)})
+    trace_event(
+        db,
+        current_user,
+        event_type="formula_config_updated",
+        status="completed",
+        public_summary="Deterministic formula settings were updated.",
+        role="System",
+        evidence=formula_config_payload(config),
+        model_role="formula",
+        llm_model=None,
+    )
+    db.commit()
+    db.refresh(config)
+    return formula_config_payload(config)
+
+
+@router.get("/formula-suggestions")
+def get_formula_suggestions(
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[dict]:
+    get_or_create_formula_config(db, current_user)
+    db.commit()
+    return list_formula_suggestions(db, current_user, limit=limit)
+
+
+@router.post("/formula-suggestions/{suggestion_id}/approve")
+def approve_formula_suggestion_route(
+    suggestion_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    suggestion = approve_formula_suggestion(db, current_user, suggestion_id)
+    if suggestion is None:
+        raise HTTPException(status_code=404, detail="Formula suggestion not found.")
+    payload = formula_suggestion_payload(suggestion)
+    audit(db, current_user, "formula_suggestion_approved", {"suggestion": payload})
+    trace_event(
+        db,
+        current_user,
+        event_type="formula_suggestion_approved",
+        status="completed",
+        public_summary="Formula suggestion was approved and applied.",
+        role="System",
+        evidence=payload,
+        model_role="formula",
+        llm_model=None,
+    )
+    db.commit()
+    return payload
+
+
+@router.post("/formula-suggestions/{suggestion_id}/reject")
+def reject_formula_suggestion_route(
+    suggestion_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    suggestion = reject_formula_suggestion(db, current_user, suggestion_id)
+    if suggestion is None:
+        raise HTTPException(status_code=404, detail="Formula suggestion not found.")
+    payload = formula_suggestion_payload(suggestion)
+    audit(db, current_user, "formula_suggestion_rejected", {"suggestion": payload})
+    trace_event(
+        db,
+        current_user,
+        event_type="formula_suggestion_rejected",
+        status="completed",
+        public_summary="Formula suggestion was rejected.",
+        role="System",
+        evidence=payload,
+        model_role="formula",
+        llm_model=None,
+    )
+    db.commit()
+    return payload
+
+
 @router.post("/pause", response_model=GuardrailResponse)
 def pause_autonomous_paper(
     db: Session = Depends(get_db),
@@ -506,14 +645,23 @@ def start_autonomous_bot(
     db.commit()
     db.refresh(profile)
 
-    task = celery_app.send_task("celery_worker.tasks.run_crew_research_cycle_for_user", args=[current_user.id])
+    queued = _queue_research_task(
+        db,
+        current_user,
+        profile,
+        max_symbols=_default_run_now_symbols(profile, None),
+        execute_immediate=True,
+        source="bot start",
+    )
     return {
         "status": "started",
         "bot_state": "running",
         "primary_exchange": exchange,
         "ready_assets": ready_assets,
         "account_id": account.id,
-        "research_task_id": task.id,
+        "research_task_id": queued["task_id"],
+        "run_id": queued["run_id"],
+        "max_symbols": queued["max_symbols"],
         "guardrails": guardrail_payload(profile),
     }
 
@@ -776,6 +924,8 @@ def create_recommendation(
         exchange=payload.exchange.strip().lower(),
         symbol=payload.symbol.strip().upper().replace("/", "-"),
         action=payload.action.strip().lower(),
+        side=payload.side.strip().lower(),
+        sleeve=payload.sleeve.strip().lower() if payload.sleeve else None,
         confidence=payload.confidence,
         thesis=payload.thesis,
         risk_notes=payload.risk_notes,
@@ -789,6 +939,11 @@ def create_recommendation(
         status="proposed",
         evidence_json=payload.evidence,
         backtest_summary=payload.backtest_summary,
+        entry_score=payload.entry_score,
+        exit_score=payload.exit_score,
+        formula_inputs=payload.formula_inputs or {},
+        formula_outputs=payload.formula_outputs or {},
+        strategy_version=payload.strategy_version,
     )
     db.add(recommendation)
     db.flush()
@@ -904,6 +1059,89 @@ def _ready_primary_asset_count(db: Session, exchange: str) -> int:
     )
 
 
+def _default_run_now_symbols(profile, requested: int | None) -> int:
+    if requested is not None:
+        return max(1, min(int(requested), 10))
+    if getattr(profile, "trade_cadence_mode", None) == "aggressive_paper":
+        return 3
+    return max(1, min(int(settings.CREW_MAX_SYMBOLS_PER_RUN or 3), 10))
+
+
+def _queue_research_task(
+    db: Session,
+    current_user: User,
+    profile,
+    *,
+    max_symbols: int,
+    execute_immediate: bool,
+    source: str,
+) -> dict:
+    thesis_model = FORMULA_ENGINE_MODEL
+    formula_config = formula_config_payload(get_or_create_formula_config(db, current_user))
+    run = AgentRun(
+        user_id=current_user.id,
+        status="queued",
+        mode="autonomous_research",
+        llm_provider="formula",
+        llm_base_url=None,
+        llm_model=thesis_model,
+        max_symbols=max_symbols,
+        requested_symbols=[],
+        selected_symbols=[],
+        summary={
+            "agents": ["Market Data Auditor", "Technical Analyst", "Risk Manager", "Backtest Analyst", "Portfolio Manager"],
+            "mode": "autonomous_research",
+            "progress": "queued",
+            "execute_immediate": execute_immediate,
+            "source": source,
+            "formula_config": {
+                "id": formula_config["id"],
+                "authority_mode": formula_config["authority_mode"],
+                "entry_score_floor": formula_config["parameters"].get("entry_score_floor"),
+                "version": formula_config["parameters"].get("version"),
+            },
+        },
+        started_at=datetime.now(timezone.utc),
+    )
+    db.add(run)
+    db.flush()
+    task = celery_app.send_task(
+        "celery_worker.tasks.run_crew_research_cycle_for_user",
+        args=[current_user.id],
+        kwargs={"run_id": run.id, "max_symbols": max_symbols, "execute_immediate": execute_immediate},
+    )
+    run.summary = {**(run.summary or {}), "task_id": task.id}
+    trace_event(
+        db,
+        current_user,
+        event_type="research_queued",
+        status="running",
+        public_summary=f"Immediate research cycle queued from {source}.",
+        role="Market Data Auditor",
+        run_id=run.id,
+        evidence={
+            "reason_code": "research_queued",
+            "task_id": task.id,
+            "run_id": run.id,
+            "max_symbols": max_symbols,
+            "execute_immediate": execute_immediate,
+            "formula_config": formula_config,
+        },
+        model_role="formula",
+        llm_model=thesis_model,
+    )
+    db.commit()
+    db.refresh(run)
+    return {
+        "status": "queued",
+        "run_id": run.id,
+        "task_id": task.id,
+        "max_symbols": max_symbols,
+        "execute_immediate": execute_immediate,
+        "formula_config": formula_config,
+    }
+
+
 def _no_trade_diagnostics(db: Session, current_user: User) -> dict[str, Any]:
     profile = get_or_create_guardrails(db, current_user)
     runtime = runtime_payload(profile, role="thesis")
@@ -919,6 +1157,32 @@ def _no_trade_diagnostics(db: Session, current_user: User) -> dict[str, Any]:
         db.query(AgentRun)
         .filter(AgentRun.user_id == current_user.id, AgentRun.mode.in_(("autonomous_research", "research_dry_run")))
         .order_by(AgentRun.created_at.desc())
+        .first()
+    )
+    candidate_research_runs = (
+        db.query(AgentRun)
+        .filter(
+            AgentRun.user_id == current_user.id,
+            AgentRun.mode == "autonomous_research",
+            AgentRun.status.in_(("queued", "running")),
+        )
+        .order_by(AgentRun.created_at.desc())
+        .all()
+    )
+    active_research_runs = [
+        row
+        for row in candidate_research_runs
+        if not _research_run_looks_stale(row, now=datetime.now(timezone.utc))
+    ]
+    stale_research_runs = [
+        row
+        for row in candidate_research_runs
+        if _research_run_looks_stale(row, now=datetime.now(timezone.utc))
+    ]
+    latest_formula_snapshot = (
+        db.query(ResearchSnapshot)
+        .filter(ResearchSnapshot.user_id == current_user.id)
+        .order_by(ResearchSnapshot.created_at.desc())
         .first()
     )
     latest_failure = (
@@ -939,6 +1203,33 @@ def _no_trade_diagnostics(db: Session, current_user: User) -> dict[str, Any]:
         .order_by(AgentTraceEvent.created_at.desc())
         .first()
     )
+    paper_account = None
+    if profile.ai_paper_account_id:
+        paper_account = (
+            db.query(PaperAccount)
+            .filter(PaperAccount.id == profile.ai_paper_account_id, PaperAccount.user_id == current_user.id)
+            .first()
+        )
+    open_positions: list[PaperPosition] = []
+    if paper_account is not None:
+        open_positions = (
+            db.query(PaperPosition)
+            .filter(PaperPosition.account_id == paper_account.id, PaperPosition.quantity > 0)
+            .order_by(PaperPosition.updated_at.desc())
+            .all()
+        )
+    unmanaged_positions = [
+        position for position in open_positions if position.take_profit is None or position.stop_loss is None
+    ]
+    latest_repaired_position = (
+        db.query(AgentTraceEvent)
+        .filter(
+            AgentTraceEvent.user_id == current_user.id,
+            AgentTraceEvent.event_type == "position_exit_repaired",
+        )
+        .order_by(AgentTraceEvent.created_at.desc())
+        .first()
+    )
 
     blockers: list[str] = []
     if not runtime.get("enabled") or not runtime.get("available"):
@@ -954,7 +1245,7 @@ def _no_trade_diagnostics(db: Session, current_user: User) -> dict[str, Any]:
     if not profile.autonomous_enabled:
         blockers.append("Autonomous paper execution is paused.")
 
-    if latest_failure is not None and latest_failure.status == "timeout":
+    if runtime.get("ai_notes_enabled") and latest_failure is not None and latest_failure.status == "timeout":
         blockers.append(
             f"{latest_failure.role} model {latest_failure.llm_model} timed out after "
             f"{latest_failure.timeout_seconds or settings.CREW_LLM_TIMEOUT_SECONDS} seconds."
@@ -963,10 +1254,16 @@ def _no_trade_diagnostics(db: Session, current_user: User) -> dict[str, Any]:
     latest_summary = latest_run.summary if latest_run is not None and isinstance(latest_run.summary, dict) else {}
     if latest_summary.get("stopped_reason"):
         blockers.append(str(latest_summary["stopped_reason"]))
-    if latest_run is not None and latest_summary.get("theses_created") == 0:
+    if active_research_runs:
+        blockers.append("Research is currently running; waiting for formula thesis and paper execution results.")
+    if stale_research_runs:
+        blockers.append("A previous research run appears interrupted; queue a fresh formula-first paper run.")
+    if unmanaged_positions:
+        blockers.append(f"{len(unmanaged_positions)} open paper position(s) need exit-plan repair.")
+    if not active_research_runs and latest_run is not None and latest_summary.get("theses_created") == 0:
         blockers.append("Latest research cycle created zero active theses.")
-    if active_thesis_count == 0:
-        blockers.append("No active thesis is waiting on an entry target.")
+    if active_thesis_count == 0 and not active_research_runs and not open_positions:
+        blockers.append("No active thesis is waiting on an entry target and no open paper positions need exit monitoring.")
     if latest_blocker is not None and latest_blocker.blocker_reason:
         blockers.append(latest_blocker.blocker_reason)
 
@@ -975,12 +1272,20 @@ def _no_trade_diagnostics(db: Session, current_user: User) -> dict[str, Any]:
         if blocker and blocker not in deduped_blockers:
             deduped_blockers.append(blocker)
 
-    if latest_failure is not None and latest_failure.status == "timeout":
+    if active_research_runs:
+        recommended_action = "Research is running now; watch the Decision Log for formula thesis, backtest, and paper order events."
+    elif stale_research_runs:
+        recommended_action = "Queue Run paper trade now to replace the interrupted research run with a fresh visible run."
+    elif unmanaged_positions and profile.trigger_monitor_enabled:
+        recommended_action = "Trigger monitoring will repair open position exit targets on the next tick, then manage take-profit and stop-loss exits."
+    elif unmanaged_positions:
+        recommended_action = "Enable trigger monitoring so open paper positions can be repaired and exit-managed."
+    elif runtime.get("ai_notes_enabled") and latest_failure is not None and latest_failure.status == "timeout":
         recommended_action = (
-            "Select a faster local thesis/trade model, then run Save, test, and run research or use the thesis dry-run."
+            "Optional AI notes are timing out; formula trading can continue while you select a faster local model."
         )
     elif active_thesis_count == 0:
-        recommended_action = "Run a thesis dry-run to verify the selected model can produce valid JSON, then queue research."
+        recommended_action = "Queue a deterministic formula paper run so the engine can create a thesis when a sleeve clears the entry floor."
     elif not profile.autonomous_enabled or not profile.trigger_monitor_enabled:
         recommended_action = "Start the bot or enable trigger monitoring so active theses can be monitored."
     else:
@@ -988,7 +1293,14 @@ def _no_trade_diagnostics(db: Session, current_user: User) -> dict[str, Any]:
 
     return {
         "active_thesis_count": active_thesis_count,
+        "active_research_tasks": [_run_payload(row) for row in active_research_runs],
         "latest_run": _run_payload(latest_run) if latest_run else None,
+        "latest_research_run": _run_payload(latest_run) if latest_run else None,
+        "latest_formula_candidate": _formula_candidate_payload(latest_formula_snapshot),
+        "latest_execution_blocker": trace_payload(latest_blocker) if latest_blocker else None,
+        "open_position_count": len(open_positions),
+        "unmanaged_position_count": len(unmanaged_positions),
+        "latest_repaired_position": trace_payload(latest_repaired_position) if latest_repaired_position else None,
         "latest_model_failure": _model_invocation_payload(latest_failure) if latest_failure else None,
         "latest_blocker": trace_payload(latest_blocker) if latest_blocker else None,
         "blockers": deduped_blockers[:10],
@@ -1036,6 +1348,67 @@ def _model_invocation_payload(row: AgentModelInvocation) -> dict[str, Any]:
         "created_at": utc_isoformat(row.created_at),
         "completed_at": utc_isoformat(row.completed_at),
     }
+
+
+def _formula_candidate_payload(row: ResearchSnapshot | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    signal = row.signal or {}
+    metrics = signal.get("formula_metrics") if isinstance(signal, dict) else None
+    if not metrics and isinstance(row.snapshot, dict):
+        metrics = row.snapshot.get("formula_metrics")
+    if not isinstance(metrics, dict):
+        return None
+    long_metrics = metrics.get("long") if isinstance(metrics.get("long"), dict) else {}
+    short_metrics = metrics.get("short") if isinstance(metrics.get("short"), dict) else {}
+    long_score = float(long_metrics.get("long_entry_score") or 0.0)
+    short_score = float(short_metrics.get("short_entry_score") or 0.0)
+    side = "short" if short_score > long_score else "long"
+    return {
+        "snapshot_id": row.id,
+        "exchange": row.exchange,
+        "symbol": row.symbol,
+        "price": row.price,
+        "side": side,
+        "entry_score": max(long_score, short_score),
+        "long_entry_score": long_score,
+        "short_entry_score": short_score,
+        "source_data_timestamp": utc_isoformat(row.source_data_timestamp),
+        "created_at": utc_isoformat(row.created_at),
+    }
+
+
+def _research_run_looks_stale(run: AgentRun, *, now: datetime) -> bool:
+    if run.status not in {"queued", "running"}:
+        return False
+    summary = run.summary if isinstance(run.summary, dict) else {}
+    checkpoint = _parse_datetime(summary.get("heartbeat_at"))
+    checkpoint = checkpoint or _as_aware_datetime(run.updated_at)
+    checkpoint = checkpoint or _as_aware_datetime(run.started_at)
+    checkpoint = checkpoint or _as_aware_datetime(run.created_at)
+    if checkpoint is None:
+        return False
+    age_seconds = (now - checkpoint).total_seconds()
+    if run.status == "queued":
+        return age_seconds > max(1800, int(settings.CREW_RESEARCH_INTERVAL_SECONDS or 1800))
+    return age_seconds > max(900, int(settings.CREW_LLM_TIMEOUT_SECONDS or 60) * 3)
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return _as_aware_datetime(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _as_aware_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def _run_payload(run: AgentRun) -> dict:

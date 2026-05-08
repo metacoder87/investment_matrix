@@ -5,11 +5,18 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.backtesting.execution import ExecutionSettings, compute_buy_fill, compute_sell_fill
+from app.backtesting.execution import (
+    ExecutionSettings,
+    compute_buy_fill,
+    compute_sell_fill,
+    compute_short_cover_fill,
+    compute_short_open_fill,
+)
 from app.models.backtest import BacktestRun
 from app.models.paper import PaperAccount, PaperOrder, PaperOrderSide, PaperOrderStatus, PaperPosition
 from app.models.research import AgentAuditLog, AgentGuardrailProfile, AgentRecommendation, AssetDataStatus
 from app.models.user import User
+from app.services.crew_formula_decisions import formula_parameters_for_user
 from app.services.crew_trace import trace_event
 from app.services.paper_trading import PaperStepPayload, execute_paper_step
 
@@ -63,6 +70,8 @@ def recommendation_payload(row: AgentRecommendation) -> dict[str, Any]:
         "symbol": row.symbol,
         "exchange": row.exchange,
         "action": row.action,
+        "side": getattr(row, "side", "long") or "long",
+        "sleeve": getattr(row, "sleeve", None),
         "confidence": row.confidence,
         "thesis": row.thesis,
         "risk_notes": row.risk_notes,
@@ -82,6 +91,11 @@ def recommendation_payload(row: AgentRecommendation) -> dict[str, Any]:
         "llm_model": getattr(row, "llm_model", None),
         "trade_decision_model": getattr(row, "trade_decision_model", None),
         "trade_decision_status": getattr(row, "trade_decision_status", None),
+        "entry_score": getattr(row, "entry_score", None),
+        "exit_score": getattr(row, "exit_score", None),
+        "formula_inputs": getattr(row, "formula_inputs", None) or {},
+        "formula_outputs": getattr(row, "formula_outputs", None) or {},
+        "strategy_version": getattr(row, "strategy_version", None),
         "created_at": row.created_at,
     }
 
@@ -112,7 +126,11 @@ def attempt_autonomous_execution(
             exchange=recommendation.exchange,
             symbol=recommendation.symbol,
             blocker_reason=reason,
-            evidence={"action": recommendation.action, "strategy": recommendation.strategy_name},
+            evidence={
+                "action": recommendation.action,
+                "strategy": recommendation.strategy_name,
+                "reason_code": _guardrail_reason_code(reason),
+            },
         )
         return
 
@@ -207,26 +225,58 @@ def execute_price_trigger_order(
     strategy: str,
     reason: str,
     max_position_pct: float,
+    take_profit: float | None = None,
+    stop_loss: float | None = None,
 ) -> dict[str, Any]:
     symbol_key = symbol.strip().upper().replace("/", "-")
     exchange_key = exchange.strip().lower()
     side_key = side.strip().lower()
     if price <= 0:
         return {"status": "rejected", "reason": "invalid_price"}
+    reason_key = reason[:200]
+    existing_order = (
+        db.query(PaperOrder)
+        .filter(PaperOrder.account_id == account.id, PaperOrder.reason == reason_key)
+        .first()
+    )
+    if existing_order is not None:
+        return {
+            "status": "skipped",
+            "reason": "duplicate_order",
+            "account_id": account.id,
+            "symbol": symbol_key,
+            "exchange": exchange_key,
+            "side": side_key,
+            "order": {
+                "id": existing_order.id,
+                "side": existing_order.side.value,
+                "status": existing_order.status.value,
+                "price": existing_order.price,
+                "quantity": existing_order.quantity,
+                "fee": existing_order.fee,
+                "strategy": existing_order.strategy,
+                "reason": existing_order.reason,
+                "timestamp": existing_order.timestamp.isoformat() if existing_order.timestamp else None,
+            },
+        }
 
     positions = (
         db.query(PaperPosition)
         .filter(PaperPosition.account_id == account.id)
         .all()
     )
+    target_position_side = "short" if side_key in {"short", "cover"} else "long"
     position = next(
-        (row for row in positions if row.symbol == symbol_key and row.exchange == exchange_key),
+        (
+            row
+            for row in positions
+            if row.symbol == symbol_key
+            and row.exchange == exchange_key
+            and (row.side or "long") == target_position_side
+        ),
         None,
     )
-    equity = float(account.cash_balance or 0.0) + sum(
-        float(pos.quantity or 0.0) * (price if pos.symbol == symbol_key and pos.exchange == exchange_key else float(pos.last_price or 0.0))
-        for pos in positions
-    )
+    equity = _account_equity_for_price(positions, float(account.cash_balance or 0.0), exchange_key, symbol_key, price)
     execution = ExecutionSettings(
         fee_rate=float(account.fee_rate or 0.001),
         slippage_bps=float(account.slippage_bps or 5.0),
@@ -245,9 +295,14 @@ def execute_price_trigger_order(
                 account_id=account.id,
                 exchange=exchange_key,
                 symbol=symbol_key,
+                side="long",
                 quantity=fill.quantity,
                 avg_entry_price=fill.price,
                 last_price=price,
+                reserved_collateral=0.0,
+                take_profit=take_profit,
+                stop_loss=stop_loss,
+                trailing_peak=fill.price,
             )
             db.add(position)
             positions.append(position)
@@ -255,6 +310,11 @@ def execute_price_trigger_order(
             position.quantity = previous_qty + fill.quantity
             position.avg_entry_price = (previous_cost + fill.notional + fill.fee) / position.quantity
             position.last_price = price
+            if take_profit is not None:
+                position.take_profit = take_profit
+            if stop_loss is not None:
+                position.stop_loss = stop_loss
+            position.trailing_peak = max(float(position.trailing_peak or fill.price), fill.price)
         order_side = PaperOrderSide.BUY
     elif side_key == "sell":
         if position is None or float(position.quantity or 0.0) <= 0:
@@ -266,6 +326,55 @@ def execute_price_trigger_order(
         position.quantity = 0.0
         position.last_price = price
         order_side = PaperOrderSide.SELL
+    elif side_key == "short":
+        fill = compute_short_open_fill(float(account.cash_balance or 0.0), equity, price, execution)
+        if fill is None:
+            return {"status": "rejected", "reason": "insufficient_cash"}
+        account.cash_balance += fill.cash_delta
+        if position is None:
+            position = PaperPosition(
+                account_id=account.id,
+                exchange=exchange_key,
+                symbol=symbol_key,
+                side="short",
+                quantity=fill.quantity,
+                avg_entry_price=fill.price,
+                last_price=price,
+                reserved_collateral=fill.notional,
+                take_profit=take_profit,
+                stop_loss=stop_loss,
+                trailing_trough=fill.price,
+            )
+            db.add(position)
+            positions.append(position)
+        else:
+            position.quantity = fill.quantity
+            position.avg_entry_price = fill.price
+            position.last_price = price
+            position.reserved_collateral = fill.notional
+            if take_profit is not None:
+                position.take_profit = take_profit
+            if stop_loss is not None:
+                position.stop_loss = stop_loss
+            position.trailing_trough = min(float(position.trailing_trough or fill.price), fill.price)
+        order_side = PaperOrderSide.SHORT
+    elif side_key == "cover":
+        if position is None or float(position.quantity or 0.0) <= 0:
+            return {"status": "skipped", "reason": "no_short_position"}
+        fill = compute_short_cover_fill(
+            float(position.quantity),
+            float(position.avg_entry_price or 0.0),
+            float(position.reserved_collateral or 0.0),
+            price,
+            execution,
+        )
+        if fill is None:
+            return {"status": "rejected", "reason": "invalid_cover_fill"}
+        account.cash_balance += fill.cash_delta
+        position.quantity = 0.0
+        position.last_price = price
+        position.reserved_collateral = 0.0
+        order_side = PaperOrderSide.COVER
     else:
         return {"status": "rejected", "reason": "unsupported_side"}
 
@@ -279,7 +388,7 @@ def execute_price_trigger_order(
         quantity=fill.quantity,
         fee=fill.fee,
         strategy=strategy,
-        reason=reason[:200],
+        reason=reason_key,
     )
     db.add(order)
     db.flush()
@@ -289,13 +398,7 @@ def execute_price_trigger_order(
             positions.remove(position)
         db.delete(position)
 
-    equity_total = float(account.cash_balance or 0.0) + sum(
-        float(pos.quantity or 0.0) * (
-            price if pos.symbol == symbol_key and pos.exchange == exchange_key else float(pos.last_price or 0.0)
-        )
-        for pos in positions
-        if float(pos.quantity or 0.0) > 0
-    )
+    equity_total = _account_equity_for_price(positions, float(account.cash_balance or 0.0), exchange_key, symbol_key, price)
     account.last_signal = side_key
     account.last_step_at = datetime.now(timezone.utc)
     account.last_equity = equity_total
@@ -314,6 +417,7 @@ def execute_price_trigger_order(
         "fill_price": fill.price,
         "quantity": fill.quantity,
         "fee": fill.fee,
+        "pnl": getattr(fill, "pnl", None),
         "cash_balance": account.cash_balance,
         "equity": equity_total,
         "order": {
@@ -327,6 +431,7 @@ def execute_price_trigger_order(
             "reason": order.reason,
             "timestamp": order.timestamp.isoformat() if order.timestamp else None,
         },
+        "position": _position_payload(position) if position is not None and float(position.quantity or 0.0) > 0 else None,
     }
 
 
@@ -338,8 +443,8 @@ def check_guardrails(
 ) -> tuple[bool, str]:
     if not profile.autonomous_enabled:
         return False, "Autonomous paper trading is disabled."
-    if recommendation.action not in {"buy", "sell"}:
-        return False, "Only buy/sell recommendations can execute autonomously."
+    if recommendation.action not in {"buy", "sell", "short", "cover"}:
+        return False, "Only buy/sell/short/cover recommendations can execute autonomously."
     if not recommendation.backtest_run_id:
         return False, "A linked backtest is required before autonomous paper execution."
     if not recommendation.paper_account_id:
@@ -358,12 +463,46 @@ def check_guardrails(
         return False, "Linked backtest was not found for the current user."
 
     metrics = backtest.metrics or {}
+    formula_params = formula_parameters_for_user(db, current_user)
     total_return_pct = float(metrics.get("total_return_pct") or metrics.get("return_pct") or 0.0)
     sharpe = float(metrics.get("sharpe_ratio") or 0.0)
-    if total_return_pct < (profile.min_backtest_return_pct or 0.0):
-        return False, "Backtest return does not meet the configured guardrail."
-    if sharpe < (profile.min_backtest_sharpe or 0.0):
-        return False, "Backtest Sharpe ratio does not meet the configured guardrail."
+    sortino = float(metrics.get("sortino_ratio") or 0.0)
+    max_drawdown_pct = float(metrics.get("max_drawdown_pct") or metrics.get("max_drawdown") or 0.0)
+    if max_drawdown_pct > 0:
+        max_drawdown_pct = -max_drawdown_pct
+    is_aggressive = getattr(profile, "trade_cadence_mode", None) == "aggressive_paper"
+    min_return = float(profile.min_backtest_return_pct or 0.0)
+    min_sharpe = float(profile.min_backtest_sharpe or 0.0)
+    if is_aggressive:
+        formula_guardrails = formula_params.get("guardrails") or {}
+        aggressive_min_return = float(formula_guardrails.get("aggressive_min_backtest_return_pct") or -10.0)
+        aggressive_max_drawdown = float(formula_guardrails.get("aggressive_max_drawdown_pct") or -25.0)
+        strategy_name = str(recommendation.strategy_name or "").strip().lower()
+        is_formula_entry = strategy_name.startswith("formula_")
+        if recommendation.action in {"buy", "short"} and is_formula_entry:
+            score = recommendation.entry_score
+            if score is None:
+                outputs = recommendation.formula_outputs or {}
+                score = outputs.get("entry_score")
+            try:
+                entry_score = float(score or 0.0)
+            except (TypeError, ValueError):
+                entry_score = 0.0
+            entry_floor = float(formula_params.get("entry_score_floor") or 0.50)
+            if entry_score < entry_floor:
+                return False, f"Formula entry score ({entry_score:.2f}) is below the paper execution floor ({entry_floor:.2f})."
+        if recommendation.action in {"buy", "short"}:
+            if total_return_pct < aggressive_min_return:
+                return False, f"Backtest return ({total_return_pct:.2f}%) is below the aggressive paper hard floor ({aggressive_min_return:.2f}%)."
+            if max_drawdown_pct < aggressive_max_drawdown:
+                return False, f"Backtest max drawdown ({max_drawdown_pct:.2f}%) is worse than the aggressive paper hard floor ({aggressive_max_drawdown:.2f}%)."
+    else:
+        if total_return_pct < min_return:
+            return False, f"Backtest return ({total_return_pct:.2f}%) does not meet the configured guardrail ({min_return:.2f}%)."
+        if sharpe < min_sharpe:
+            return False, f"Backtest Sharpe ratio ({sharpe:.2f}) does not meet the configured guardrail ({min_sharpe:.2f})."
+        if sortino < (min_sharpe * 1.25):
+            return False, f"Backtest Sortino ratio ({sortino:.2f}) does not meet the sleeve-aware guardrail ({min_sharpe * 1.25:.2f})."
 
     staleness_limit = profile.min_data_freshness_seconds or 900
     if getattr(profile, "trade_cadence_mode", None) == "aggressive_paper":
@@ -398,7 +537,27 @@ def check_guardrails(
         .filter(PaperPosition.account_id == recommendation.paper_account_id, PaperPosition.quantity > 0)
         .count()
     )
-    if recommendation.action == "buy" and open_positions >= (profile.max_open_positions or 12):
+    if recommendation.action in {"buy", "short"}:
+        symbol_key = recommendation.symbol.strip().upper().replace("/", "-")
+        exchange_key = recommendation.exchange.strip().lower()
+        opposite_side = "short" if recommendation.action == "buy" else "long"
+        opposite_position = (
+            db.query(PaperPosition)
+            .filter(
+                PaperPosition.account_id == recommendation.paper_account_id,
+                PaperPosition.exchange == exchange_key,
+                PaperPosition.symbol == symbol_key,
+                PaperPosition.side == opposite_side,
+                PaperPosition.quantity > 0,
+            )
+            .first()
+        )
+        if opposite_position is not None:
+            return False, (
+                f"Opposite {opposite_side} paper position is already open for "
+                f"{exchange_key}:{symbol_key}; new {recommendation.action} entry is blocked."
+            )
+    if recommendation.action in {"buy", "short"} and open_positions >= (profile.max_open_positions or 12):
         return False, "Maximum open positions guardrail would be exceeded."
 
     start_of_day = datetime.combine(datetime.now(timezone.utc).date(), time.min).replace(tzinfo=timezone.utc)
@@ -411,6 +570,50 @@ def check_guardrails(
         return False, "Maximum trades per day guardrail would be exceeded."
 
     return True, "Guardrails passed."
+
+
+def _account_equity_for_price(
+    positions: list[PaperPosition],
+    cash: float,
+    exchange: str,
+    symbol: str,
+    price: float,
+) -> float:
+    equity = cash
+    for pos in positions:
+        qty = float(pos.quantity or 0.0)
+        if qty <= 0:
+            continue
+        mark = price if pos.symbol == symbol and pos.exchange == exchange else float(pos.last_price or 0.0)
+        if (pos.side or "long") == "short":
+            entry = float(pos.avg_entry_price or 0.0)
+            equity += float(pos.reserved_collateral or 0.0) + (entry - mark) * qty
+        else:
+            equity += qty * mark
+    return equity
+
+
+def _guardrail_reason_code(reason: str) -> str:
+    if "Opposite" in reason and "position is already open" in reason:
+        return "opposite_position_blocked"
+    return "guardrail_blocked"
+
+
+def _position_payload(position: PaperPosition) -> dict[str, Any]:
+    return {
+        "id": position.id,
+        "symbol": position.symbol,
+        "exchange": position.exchange,
+        "side": position.side or "long",
+        "quantity": position.quantity,
+        "avg_entry_price": position.avg_entry_price,
+        "last_price": position.last_price,
+        "reserved_collateral": position.reserved_collateral or 0.0,
+        "take_profit": position.take_profit,
+        "stop_loss": position.stop_loss,
+        "trailing_peak": position.trailing_peak,
+        "trailing_trough": position.trailing_trough,
+    }
 
 
 def audit(

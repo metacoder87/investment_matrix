@@ -124,6 +124,7 @@ def trace_event_once_per_window(
 
 
 def trace_payload(row: AgentTraceEvent, *, debug: bool = False) -> dict[str, Any]:
+    evidence = row.evidence_json or {}
     payload = {
         "id": row.id,
         "run_id": row.run_id,
@@ -138,7 +139,8 @@ def trace_payload(row: AgentTraceEvent, *, debug: bool = False) -> dict[str, Any
         "public_summary": row.public_summary,
         "rationale": row.rationale,
         "blocker_reason": row.blocker_reason,
-        "evidence": row.evidence_json or {},
+        "reason_code": evidence.get("reason_code") or _reason_code(row.event_type, row.status),
+        "evidence": evidence,
         "validation_error": row.validation_error,
         "model_role": row.model_role,
         "llm_model": row.llm_model,
@@ -148,6 +150,29 @@ def trace_payload(row: AgentTraceEvent, *, debug: bool = False) -> dict[str, Any
         payload["prompt"] = row.prompt
         payload["raw_model_json"] = row.raw_model_json
     return payload
+
+
+def _reason_code(event_type: str, status: str) -> str:
+    if event_type == "guardrail_blocked":
+        return "guardrail_blocked"
+    mapping = {
+        "research_queued": "research_queued",
+        "research_started": "research_running",
+        "research_completed": "research_completed",
+        "research_blocked": "research_blocked",
+        "agent_output_rejected": "llm_output_rejected",
+        "llm_formula_fallback": "llm_timeout_formula_fallback",
+        "thesis_created": "active_thesis",
+        "trigger_waiting": "no_active_thesis" if status == "waiting" else "trigger_waiting",
+        "guardrail_blocked": "guardrail_blocked",
+        "trade_decision_failed": "trade_note_failed",
+        "trade_decision_rejected": "trade_note_failed",
+        "paper_order_executed": "formula_entry_executed",
+        "paper_order_rejected": "paper_order_rejected",
+        "trigger_expired": "expired",
+        "position_exit_repaired": "position_exit_repaired",
+    }
+    return mapping.get(event_type, event_type)
 
 
 def utc_isoformat(value: datetime | None) -> str | None:

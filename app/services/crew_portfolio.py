@@ -16,6 +16,7 @@ from app.models.research import (
     AgentPortfolioSnapshot,
     AgentRecommendation,
     AgentResearchThesis,
+    AgentTraceEvent,
 )
 from app.models.user import User
 from app.services.crew_execution import audit, get_or_create_guardrails
@@ -339,7 +340,39 @@ def lessons(db: Session, current_user: User, limit: int = 100) -> list[dict[str,
 
 
 def recent_lessons_for_prompt(db: Session, current_user: User, limit: int = 12) -> list[dict[str, Any]]:
-    return lessons(db, current_user, limit=limit)
+    """Build a rich lesson payload that includes recent individual lessons
+    plus aggregated strategy performance stats, so the LLM can adapt its
+    decision-making based on what has worked and what hasn't."""
+    recent = lessons(db, current_user, limit=limit)
+
+    # Add aggregated strategy performance summary
+    perf = strategy_performance(db, current_user)
+    perf_summary = []
+    for strat in perf:
+        if strat.get("executed", 0) > 0 or strat.get("wins", 0) + strat.get("losses", 0) > 0:
+            perf_summary.append({
+                "strategy": strat["strategy_name"],
+                "total_trades": strat["executed"],
+                "wins": strat["wins"],
+                "losses": strat["losses"],
+                "avg_return_pct": round(strat["avg_return_pct"], 2),
+                "success_rate_pct": round(strat["success_rate_pct"], 1),
+            })
+
+    # Prepend a performance summary entry so the LLM sees aggregate stats first
+    if perf_summary:
+        recent.insert(0, {
+            "id": None,
+            "lesson": (
+                "STRATEGY PERFORMANCE SUMMARY — use this to pick the best-performing strategy. "
+                "Favor strategies with higher success_rate and positive avg_return. "
+                "Avoid strategies that consistently lose."
+            ),
+            "outcome": "performance_summary",
+            "strategy_performance": perf_summary,
+        })
+
+    return recent
 
 
 def strategy_performance(db: Session, current_user: User) -> list[dict[str, Any]]:
@@ -396,10 +429,15 @@ def strategy_performance(db: Session, current_user: User) -> list[dict[str, Any]
 
 def _build_account_summary(db: Session, current_user: User, account: PaperAccount) -> dict[str, Any]:
     positions = _positions_payload(db, account)
-    invested = sum(float(position["market_value"]) for position in positions)
+    long_positions = [position for position in positions if position.get("side", "long") == "long"]
+    short_positions = [position for position in positions if position.get("side") == "short"]
+    long_exposure = sum(float(position["market_value"]) for position in long_positions)
+    short_exposure = sum(float(position["market_value"]) for position in short_positions)
+    short_reserved = sum(float(position.get("reserved_collateral") or 0.0) for position in short_positions)
+    invested = long_exposure + short_reserved
     unrealized = sum(float(position["unrealized_pnl"]) for position in positions)
     cash = float(account.cash_balance or 0.0)
-    equity = cash + invested
+    equity = cash + sum(float(position.get("equity_value") or position["market_value"]) for position in positions)
 
     if not account.equity_peak or account.equity_peak <= 0:
         account.equity_peak = equity
@@ -409,7 +447,8 @@ def _build_account_summary(db: Session, current_user: User, account: PaperAccoun
 
     peak = float(account.equity_peak or equity or 0.0)
     drawdown_pct = ((equity / peak) - 1.0) * 100 if peak > 0 else 0.0
-    exposure_pct = (invested / equity) * 100 if equity > 0 else 0.0
+    gross_exposure = long_exposure + short_exposure
+    exposure_pct = (gross_exposure / equity) * 100 if equity > 0 else 0.0
     reset_count = (
         db.query(AgentBankrollReset)
         .filter(AgentBankrollReset.user_id == current_user.id, AgentBankrollReset.account_id == account.id)
@@ -436,6 +475,11 @@ def _build_account_summary(db: Session, current_user: User, account: PaperAccoun
     )
     current_cycle_pnl = equity - starting_bankroll
     all_time_pnl = float(reset_realized) + current_cycle_pnl
+    sleeve_win_rates = _sleeve_win_rates(db, current_user)
+    long_unrealized = sum(float(position["unrealized_pnl"]) for position in long_positions)
+    short_unrealized = sum(float(position["unrealized_pnl"]) for position in short_positions)
+    long_allocation = equity * 0.5
+    short_allocation = equity * 0.5
 
     last_reset_at = last_reset.created_at if last_reset else None
     seconds_since_last_reset = None
@@ -451,6 +495,19 @@ def _build_account_summary(db: Session, current_user: User, account: PaperAccoun
         "available_bankroll": cash,
         "invested_value": invested,
         "total_equity": equity,
+        "long_exposure": long_exposure,
+        "short_exposure": short_exposure,
+        "short_reserved_collateral": short_reserved,
+        "long_unrealized_pnl": long_unrealized,
+        "short_unrealized_pnl": short_unrealized,
+        "sleeve_cash": {
+            "long": max(0.0, long_allocation - long_exposure),
+            "short": max(0.0, short_allocation - short_reserved),
+        },
+        "sleeve_reserved_collateral": {"long": 0.0, "short": short_reserved},
+        "sleeve_pnl": {"long": long_unrealized, "short": short_unrealized},
+        "sleeve_win_rates": sleeve_win_rates,
+        "bankroll_split": {"long": 0.5, "short": 0.5},
         "realized_pnl": realized_pnl,
         "unrealized_pnl": unrealized,
         "all_time_pnl": all_time_pnl,
@@ -478,29 +535,88 @@ def _positions_payload(db: Session, account: PaperAccount) -> list[dict[str, Any
         mark, mark_ts = latest_price(db, row.exchange, row.symbol)
         last_price = float(mark if mark is not None else row.last_price or 0.0)
         row.last_price = last_price
+        side = row.side or "long"
         quantity = float(row.quantity or 0.0)
         avg_entry = float(row.avg_entry_price or 0.0)
         market_value = quantity * last_price
         cost_basis = quantity * avg_entry
-        unrealized = market_value - cost_basis
-        return_pct = ((last_price / avg_entry) - 1.0) * 100 if avg_entry > 0 else 0.0
+        reserved_collateral = float(row.reserved_collateral or 0.0)
+        if side == "short":
+            unrealized = (avg_entry - last_price) * quantity
+            basis = reserved_collateral or cost_basis
+            return_pct = (unrealized / basis) * 100 if basis > 0 else 0.0
+            equity_value = basis + unrealized
+        else:
+            unrealized = market_value - cost_basis
+            return_pct = ((last_price / avg_entry) - 1.0) * 100 if avg_entry > 0 else 0.0
+            equity_value = market_value
+        exit_health, exit_source = _position_exit_health(db, account, row)
         payload.append(
             {
                 "id": row.id,
                 "symbol": row.symbol,
                 "exchange": row.exchange,
+                "side": side,
                 "quantity": quantity,
                 "avg_entry_price": avg_entry,
                 "last_price": last_price,
                 "latest_price_timestamp": mark_ts.isoformat() if mark_ts else None,
                 "market_value": market_value,
                 "cost_basis": cost_basis,
+                "reserved_collateral": reserved_collateral,
+                "take_profit": row.take_profit,
+                "stop_loss": row.stop_loss,
+                "trailing_peak": row.trailing_peak,
+                "trailing_trough": row.trailing_trough,
+                "exit_health": exit_health,
+                "exit_source": exit_source,
+                "distance_to_take_profit_pct": _distance_to_exit_pct(side, last_price, row.take_profit, "take_profit"),
+                "distance_to_stop_loss_pct": _distance_to_exit_pct(side, last_price, row.stop_loss, "stop_loss"),
+                "equity_value": equity_value,
                 "unrealized_pnl": unrealized,
                 "return_pct": return_pct,
                 "updated_at": row.updated_at.isoformat() if row.updated_at else None,
             }
         )
     return payload
+
+
+def _position_exit_health(db: Session, account: PaperAccount, position: PaperPosition) -> tuple[str, str]:
+    if position.take_profit is None or position.stop_loss is None:
+        return "missing", "missing"
+
+    repairs = (
+        db.query(AgentTraceEvent)
+        .filter(
+            AgentTraceEvent.user_id == account.user_id,
+            AgentTraceEvent.event_type == "position_exit_repaired",
+            AgentTraceEvent.exchange == position.exchange,
+            AgentTraceEvent.symbol == position.symbol,
+        )
+        .order_by(AgentTraceEvent.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    for repair in repairs:
+        evidence = repair.evidence_json or {}
+        if evidence.get("position_id") == position.id:
+            return "repaired", str(evidence.get("exit_source") or "repaired")
+    return "managed", "position"
+
+
+def _distance_to_exit_pct(side: str, last_price: float, target: float | None, exit_kind: str) -> float | None:
+    if target is None or last_price <= 0:
+        return None
+    if side == "short":
+        if exit_kind == "take_profit":
+            distance = ((last_price - float(target)) / last_price) * 100
+        else:
+            distance = ((float(target) - last_price) / last_price) * 100
+    elif exit_kind == "take_profit":
+        distance = ((float(target) - last_price) / last_price) * 100
+    else:
+        distance = ((last_price - float(target)) / last_price) * 100
+    return round(distance, 4)
 
 
 def _orders_payload(db: Session, account: PaperAccount, limit: int) -> list[dict[str, Any]]:
@@ -537,6 +653,7 @@ def _realized_pnl_from_orders(db: Session, account: PaperAccount) -> float:
         .all()
     )
     lots: dict[tuple[str, str], dict[str, float]] = {}
+    short_lots: dict[tuple[str, str], dict[str, float]] = {}
     realized = 0.0
     for order in orders:
         key = (order.exchange, order.symbol)
@@ -555,7 +672,44 @@ def _realized_pnl_from_orders(db: Session, account: PaperAccount) -> float:
             state["qty"] -= sell_qty
             if state["qty"] <= 0:
                 state["avg"] = 0.0
+        elif side == PaperOrderSide.SHORT.value:
+            short_state = short_lots.setdefault(key, {"qty": 0.0, "avg": 0.0, "open_fee": 0.0})
+            total_entry = short_state["qty"] * short_state["avg"] + qty * price
+            short_state["qty"] += qty
+            short_state["avg"] = total_entry / short_state["qty"] if short_state["qty"] > 0 else 0.0
+            short_state["open_fee"] += fee
+        elif side == PaperOrderSide.COVER.value:
+            short_state = short_lots.setdefault(key, {"qty": 0.0, "avg": 0.0, "open_fee": 0.0})
+            if short_state["qty"] > 0:
+                cover_qty = min(qty, short_state["qty"])
+                open_fee_share = short_state["open_fee"] * (cover_qty / short_state["qty"])
+                realized += cover_qty * (short_state["avg"] - price) - fee - open_fee_share
+                short_state["qty"] -= cover_qty
+                short_state["open_fee"] -= open_fee_share
+                if short_state["qty"] <= 0:
+                    short_state["avg"] = 0.0
+                    short_state["open_fee"] = 0.0
     return realized
+
+
+def _sleeve_win_rates(db: Session, current_user: User) -> dict[str, float]:
+    lessons_rows = (
+        db.query(AgentLesson)
+        .filter(
+            AgentLesson.user_id == current_user.id,
+            AgentLesson.return_pct.isnot(None),
+            AgentLesson.outcome.in_(("take_profit", "stop_loss", "win", "loss")),
+        )
+        .all()
+    )
+    buckets: dict[str, list[float]] = {"long": [], "short": []}
+    for lesson in lessons_rows:
+        sleeve = "short" if lesson.strategy_name == "formula_quick_short" else "long"
+        buckets.setdefault(sleeve, []).append(float(lesson.return_pct or 0.0))
+    return {
+        sleeve: round((sum(1 for value in returns if value > 0) / len(returns)) * 100, 2) if returns else 0.0
+        for sleeve, returns in buckets.items()
+    }
 
 
 def _reset_payload(row: AgentBankrollReset) -> dict[str, Any]:

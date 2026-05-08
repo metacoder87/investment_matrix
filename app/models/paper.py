@@ -15,12 +15,18 @@ def utc_now_naive() -> datetime:
 class PaperOrderSide(str, enum.Enum):
     BUY = "buy"
     SELL = "sell"
+    SHORT = "short"
+    COVER = "cover"
 
 
 class PaperOrderStatus(str, enum.Enum):
     FILLED = "filled"
     REJECTED = "rejected"
     SKIPPED = "skipped"
+
+
+def _enum_values(enum_cls):
+    return [member.value for member in enum_cls]
 
 
 class PaperAccount(Base):
@@ -59,9 +65,15 @@ class PaperPosition(Base):
     account_id = Column(Integer, ForeignKey("paper_accounts.id"), nullable=False, index=True)
     exchange = Column(String(20), nullable=False)
     symbol = Column(String(50), nullable=False, index=True)
+    side = Column(String(20), nullable=False, default="long")
     quantity = Column(Float, default=0.0)
     avg_entry_price = Column(Float, default=0.0)
     last_price = Column(Float, default=0.0)
+    reserved_collateral = Column(Float, default=0.0)
+    take_profit = Column(Float, nullable=True)
+    stop_loss = Column(Float, nullable=True)
+    trailing_peak = Column(Float, nullable=True)
+    trailing_trough = Column(Float, nullable=True)
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
 
     account = relationship("PaperAccount", back_populates="positions")
@@ -75,8 +87,8 @@ class PaperOrder(Base):
     exchange = Column(String(20), nullable=False)
     symbol = Column(String(50), nullable=False, index=True)
 
-    side = Column(SAEnum(PaperOrderSide), nullable=False)
-    status = Column(SAEnum(PaperOrderStatus), default=PaperOrderStatus.FILLED)
+    side = Column(SAEnum(PaperOrderSide, values_callable=_enum_values), nullable=False)
+    status = Column(SAEnum(PaperOrderStatus, values_callable=_enum_values), default=PaperOrderStatus.FILLED)
     price = Column(Float, nullable=False)
     quantity = Column(Float, nullable=False)
     fee = Column(Float, nullable=False)
