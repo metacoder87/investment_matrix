@@ -42,7 +42,7 @@ class BacktestTrade(Base):
     run_id = Column(Integer, ForeignKey("backtest_runs.id"), nullable=False, index=True)
     timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
 
-    side = Column(String(4), nullable=False)
+    side = Column(String(10), nullable=False)
     price = Column(Float, nullable=False)
     quantity = Column(Float, nullable=False)
     fee = Column(Float, nullable=False)
