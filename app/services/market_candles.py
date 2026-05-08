@@ -19,6 +19,7 @@ class CandleLoadResult:
     requested_bucket_seconds: int
     bucket_seconds: int
     source: str
+    resolution: str = "unknown"
 
 
 def load_candles_df(
@@ -75,6 +76,7 @@ def load_candles_df(
         requested_bucket_seconds=requested_bucket_seconds,
         bucket_seconds=bucket_seconds,
         source=source_used,
+        resolution=_resolution_for(source_used, bucket_seconds),
     )
 
 
@@ -140,6 +142,19 @@ def _load_ticks(
 
     dialect = db.get_bind().dialect.name
     if dialect == "postgresql":
+        if not _is_recent_window(end_dt):
+            for view_name, view_bucket_seconds in _rollup_candidates(bucket_seconds):
+                candles = _load_tick_rollup(
+                    db,
+                    asset_id=asset.id,
+                    start_dt=start_dt,
+                    end_dt=end_dt,
+                    bucket_seconds=max(bucket_seconds, view_bucket_seconds),
+                    view_name=view_name,
+                )
+                if candles:
+                    return candles
+
         bucket_interval = f"{bucket_seconds} seconds"
         sql = text(
             """
@@ -191,6 +206,84 @@ def _load_ticks(
         price_attr="price",
         volume_attr="volume",
     )
+
+
+def _load_tick_rollup(
+    db: Session,
+    *,
+    asset_id: int,
+    start_dt: datetime,
+    end_dt: datetime,
+    bucket_seconds: int,
+    view_name: str,
+) -> list[dict]:
+    bucket_interval = f"{bucket_seconds} seconds"
+    sql = text(
+        f"""
+        SELECT
+          time_bucket(CAST(:bucket AS interval), bucket) AS bucket,
+          first(open, bucket) AS open,
+          max(high) AS high,
+          min(low) AS low,
+          last(close, bucket) AS close,
+          SUM(volume) AS volume,
+          SUM(trades) AS trades
+        FROM {view_name}
+        WHERE asset_id = :asset_id
+          AND bucket >= :start
+          AND bucket <= :end
+        GROUP BY bucket
+        ORDER BY bucket ASC
+        """
+    )
+    try:
+        rows = (
+            db.execute(
+                sql,
+                {
+                    "bucket": bucket_interval,
+                    "asset_id": asset_id,
+                    "start": start_dt,
+                    "end": end_dt,
+                },
+            )
+            .mappings()
+            .all()
+        )
+    except Exception:
+        return []
+    return _rows_to_candles(rows)
+
+
+def _rollup_candidates(bucket_seconds: int) -> list[tuple[str, int]]:
+    if bucket_seconds >= 300:
+        return [("ticks_5m", 300), ("ticks_1m", 60)]
+    if bucket_seconds >= 60:
+        return [("ticks_1m", 60)]
+    if bucket_seconds >= 5:
+        return [("ticks_5s", 5)]
+    if bucket_seconds >= 3:
+        return [("ticks_3s", 3)]
+    return [("ticks_1s", 1)]
+
+
+def _is_recent_window(end_dt: datetime) -> bool:
+    now = datetime.now(timezone.utc)
+    if end_dt.tzinfo is None:
+        end_dt = end_dt.replace(tzinfo=timezone.utc)
+    return now - end_dt <= pd.Timedelta(minutes=5).to_pytimedelta()
+
+
+def _resolution_for(source: str, bucket_seconds: int) -> str:
+    if source == "ticks" and bucket_seconds >= 60:
+        return "timescale_tick_rollup_or_raw"
+    if source == "ticks":
+        return "raw_ticks"
+    if source == "market_trades":
+        return "compatibility_trades"
+    if source == "prices":
+        return "ohlcv_candles"
+    return "none"
 
 
 def _load_market_trades(

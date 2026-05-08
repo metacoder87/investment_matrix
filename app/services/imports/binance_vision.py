@@ -31,7 +31,9 @@ def trades_importer(path: str | Path, *, symbol: str, exchange: str) -> CsvTickI
             "side": "isBuyerMaker",
             "trade_id": "tradeId",
         },
-        time_unit="ms",
+        # Binance historical spot files moved from millisecond to microsecond
+        # timestamps after 2025. Let the CSV importer auto-detect precision.
+        time_unit=None,
         side_map=side_map,
         is_aggregated=False,
     )
@@ -63,7 +65,9 @@ def agg_trades_importer(path: str | Path, *, symbol: str, exchange: str) -> CsvT
             "side": "isBuyerMaker",
             "trade_id": "aggTradeId",
         },
-        time_unit="ms",
+        # Binance historical spot files moved from millisecond to microsecond
+        # timestamps after 2025. Let the CSV importer auto-detect precision.
+        time_unit=None,
         side_map=side_map,
         is_aggregated=True,
     )

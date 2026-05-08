@@ -42,6 +42,11 @@ beat_schedule.update({
         "schedule": crontab(hour=1, minute=10),
         "args": ["kraken"],
     },
+    "sync-all-free-markets-daily": {
+        "task": "celery_worker.tasks.sync_all_exchange_markets_task",
+        "schedule": crontab(hour=1, minute=30),
+        "args": [],
+    },
     "backfill-core-hourly": {
         "task": "celery_worker.tasks.backfill_core_universe",
         "schedule": crontab(minute=0),  # Top of every hour
@@ -54,6 +59,39 @@ beat_schedule.update({
     }
 })
 
+if settings.STREAM_DYNAMIC_ENABLED:
+    beat_schedule["ingestion-capacity-monitor"] = {
+        "task": "celery_worker.tasks.collect_ingestion_telemetry_task",
+        "schedule": timedelta(seconds=max(15, settings.INGEST_CAPACITY_MONITOR_SECONDS)),
+        "args": [],
+    }
+    beat_schedule["stream-target-allocator"] = {
+        "task": "celery_worker.tasks.allocate_stream_targets_task",
+        "schedule": timedelta(seconds=max(15, settings.STREAM_REBALANCE_SECONDS)),
+        "args": [],
+    }
+
+if settings.MARKET_ACTIVATION_ENABLED:
+    beat_schedule["market-coverage-activation"] = {
+        "task": "celery_worker.tasks.activate_market_coverage_task",
+        "schedule": timedelta(seconds=max(300, settings.MARKET_ACTIVATION_INTERVAL_SECONDS)),
+        "args": [],
+    }
+
+if settings.TIER2_REST_GAP_FILL_ENABLED:
+    beat_schedule["tier2-rest-gap-fill"] = {
+        "task": "celery_worker.tasks.schedule_tiered_rest_gap_fills_task",
+        "schedule": timedelta(seconds=max(60, settings.TIER2_REST_GAP_FILL_SECONDS)),
+        "args": [],
+    }
+
+if settings.DEX_INGEST_ENABLED:
+    beat_schedule["dex-context-refresh"] = {
+        "task": "celery_worker.tasks.ingest_dex_context_task",
+        "schedule": timedelta(seconds=max(300, settings.DEX_CONTEXT_REFRESH_SECONDS)),
+        "args": [],
+    }
+
 if settings.PAPER_SCHEDULER_ENABLED:
     interval = max(5, settings.PAPER_SCHEDULER_INTERVAL_SECONDS)
     beat_schedule["paper-trading-tick"] = {
@@ -65,6 +103,10 @@ if settings.CREW_RESEARCH_ENABLED:
     beat_schedule["crew-autonomous-research"] = {
         "task": "celery_worker.tasks.run_crew_research_cycles",
         "schedule": timedelta(seconds=max(60, settings.CREW_RESEARCH_INTERVAL_SECONDS)),
+    }
+    beat_schedule["crew-formula-learning"] = {
+        "task": "celery_worker.tasks.run_formula_learning_cycles",
+        "schedule": timedelta(seconds=max(300, settings.CREW_FORMULA_LEARNING_INTERVAL_SECONDS)),
     }
 
 if settings.CREW_TRIGGER_MONITOR_ENABLED:

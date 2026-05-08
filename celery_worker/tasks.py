@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import ccxt.async_support as ccxt
+import redis
 from sqlalchemy import func
 
 import app.models.portfolio  # noqa: F401
@@ -34,6 +36,35 @@ from app.services.market_resolution import (
 )
 
 logger = logging.getLogger("cryptoinsight.tasks")
+
+
+def _acquire_task_lock(name: str, ttl_seconds: int):
+    token = uuid.uuid4().hex
+    client = redis.Redis.from_url(celery_app.conf.broker_url)
+    acquired = client.set(f"task-lock:{name}", token, nx=True, ex=ttl_seconds)
+    if not acquired:
+        return None
+    return client, token
+
+
+def _release_task_lock(name: str, lock) -> None:
+    if lock is None:
+        return
+    client, token = lock
+    try:
+        client.eval(
+            """
+            if redis.call("get", KEYS[1]) == ARGV[1] then
+                return redis.call("del", KEYS[1])
+            end
+            return 0
+            """,
+            1,
+            f"task-lock:{name}",
+            token,
+        )
+    finally:
+        client.close()
 
 
 async def _close_exchange_client(exchange) -> None:
@@ -88,6 +119,15 @@ def _parse_coingecko_timestamp(value: str | None) -> datetime | None:
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except Exception:
+        return None
+
+
+def _float_or_none(value) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
         return None
 
 
@@ -841,7 +881,8 @@ def run_crew_research_cycles():
             if not user:
                 continue
             try:
-                result = run_autonomous_research_cycle(db, user)
+                max_symbols = 3 if getattr(profile, "trade_cadence_mode", None) == "aggressive_paper" else None
+                result = run_autonomous_research_cycle(db, user, max_symbols=max_symbols, execute_immediate=True)
                 results.append({"user_id": user.id, **result})
             except Exception as exc:
                 logger.exception("Autonomous research cycle failed for user_id=%s", user.id)
@@ -850,7 +891,12 @@ def run_crew_research_cycles():
 
 
 @celery_app.task
-def run_crew_research_cycle_for_user(user_id: int):
+def run_crew_research_cycle_for_user(
+    user_id: int,
+    run_id: int | None = None,
+    max_symbols: int | None = None,
+    execute_immediate: bool = True,
+):
     from app.config import settings
     from app.services.crew_autonomy import run_autonomous_research_cycle
 
@@ -862,38 +908,79 @@ def run_crew_research_cycle_for_user(user_id: int):
         if not user:
             return {"status": "not_found", "reason": "User not found.", "user_id": user_id}
         try:
-            return {"user_id": user.id, **run_autonomous_research_cycle(db, user)}
+            return {
+                "user_id": user.id,
+                **run_autonomous_research_cycle(
+                    db,
+                    user,
+                    max_symbols=max_symbols,
+                    execute_immediate=execute_immediate,
+                    run_id=run_id,
+                ),
+            }
         except Exception as exc:
             logger.exception("Immediate autonomous research cycle failed for user_id=%s", user_id)
             return {"status": "failed", "user_id": user_id, "error": str(exc)}
 
 
 @celery_app.task
-def monitor_crew_triggers():
-    from app.config import settings
-    from app.services.crew_autonomy import monitor_price_triggers
-
-    if not settings.CREW_TRIGGER_MONITOR_ENABLED:
-        return {"status": "disabled", "reason": "CREW_TRIGGER_MONITOR_ENABLED is false."}
+def run_formula_learning_cycles():
+    from app.services.crew_formula_decisions import maybe_create_formula_suggestion
 
     results = []
     with session_scope() as db:
-        profiles = (
-            db.query(AgentGuardrailProfile)
-            .filter(AgentGuardrailProfile.trigger_monitor_enabled.is_(True))
-            .all()
-        )
+        profiles = db.query(AgentGuardrailProfile).all()
         for profile in profiles:
             user = db.query(User).filter(User.id == profile.user_id).first()
             if not user:
                 continue
             try:
-                result = monitor_price_triggers(db, user)
-                results.append({"user_id": user.id, **result})
+                suggestion = maybe_create_formula_suggestion(db, user, source="scheduled_learning")
+                results.append(
+                    {
+                        "user_id": user.id,
+                        "suggestion_id": suggestion.id if suggestion else None,
+                        "status": suggestion.status if suggestion else "no_change",
+                    }
+                )
             except Exception as exc:
-                logger.exception("Crew trigger monitor failed for user_id=%s", user.id)
+                logger.exception("Formula learning cycle failed for user_id=%s", user.id)
                 results.append({"user_id": user.id, "status": "failed", "error": str(exc)})
     return {"status": "ok", "users": len(results), "results": results}
+
+
+@celery_app.task(bind=True, soft_time_limit=180, time_limit=240, max_retries=0)
+def monitor_crew_triggers(self):
+    from app.config import settings
+    from app.services.crew_autonomy import monitor_price_triggers
+
+    if not settings.CREW_TRIGGER_MONITOR_ENABLED:
+        return {"status": "disabled", "reason": "CREW_TRIGGER_MONITOR_ENABLED is false."}
+    lock = _acquire_task_lock("crew-trigger-monitor", ttl_seconds=240)
+    if lock is None:
+        return {"status": "skipped", "reason": "Crew trigger monitor is already running."}
+
+    try:
+        results = []
+        with session_scope() as db:
+            profiles = (
+                db.query(AgentGuardrailProfile)
+                .filter(AgentGuardrailProfile.trigger_monitor_enabled.is_(True))
+                .all()
+            )
+            for profile in profiles:
+                user = db.query(User).filter(User.id == profile.user_id).first()
+                if not user:
+                    continue
+                try:
+                    result = monitor_price_triggers(db, user)
+                    results.append({"user_id": user.id, **result})
+                except Exception as exc:
+                    logger.exception("Crew trigger monitor failed for user_id=%s", user.id)
+                    results.append({"user_id": user.id, "status": "failed", "error": str(exc)})
+        return {"status": "ok", "users": len(results), "results": results}
+    finally:
+        _release_task_lock("crew-trigger-monitor", lock)
 
 
 @celery_app.task
@@ -903,6 +990,300 @@ def sync_exchange_markets_task(exchange_id: str = "kraken"):
     exchange_key = (exchange_id or "kraken").strip().lower()
     with session_scope() as db:
         return asyncio.run(sync_exchange_markets(db, exchange=exchange_key))
+
+
+@celery_app.task
+def sync_all_exchange_markets_task():
+    from app.services.data_sources import sync_all_exchange_markets
+
+    with session_scope() as db:
+        return asyncio.run(sync_all_exchange_markets(db))
+
+
+@celery_app.task
+def activate_market_coverage_task(queue_work: bool = True, limit: int | None = None, queue_limit: int | None = None):
+    from app.config import settings
+    from app.services.market_activation import activate_market_coverage
+
+    if not settings.MARKET_ACTIVATION_ENABLED:
+        return {"status": "disabled", "reason": "MARKET_ACTIVATION_ENABLED is false."}
+    with session_scope() as db:
+        return activate_market_coverage(
+            db,
+            queue_work=queue_work,
+            limit=limit,
+            queue_limit=queue_limit,
+        )
+
+
+@celery_app.task
+def allocate_stream_targets_task(publish_commands: bool = True):
+    from app.config import settings
+    from app.services.stream_allocator import allocate_stream_targets
+
+    if not settings.STREAM_DYNAMIC_ENABLED:
+        return {"status": "disabled", "reason": "STREAM_DYNAMIC_ENABLED is false."}
+    with session_scope() as db:
+        return allocate_stream_targets(db, publish_commands=publish_commands)
+
+
+@celery_app.task
+def collect_ingestion_telemetry_task():
+    from app.services.ingestion_telemetry import collect_ingestion_telemetry
+
+    with session_scope() as db:
+        return asyncio.run(collect_ingestion_telemetry(db))
+
+
+@celery_app.task(bind=True, soft_time_limit=180, time_limit=240, max_retries=0)
+def ingest_recent_trades_task(
+    self,
+    symbol: str,
+    exchange_id: str = "coinbase",
+    limit: int = 500,
+):
+    from app.services.imports.storage import bulk_insert_ticks, get_or_create_asset
+    from app.services.imports.types import TickRecord
+
+    exchange_key = exchange_id.strip().lower()
+    symbol_ccxt = _normalize_symbol(symbol, exchange_key)
+    symbol_db = _normalize_symbol_db(symbol, exchange_key)
+    limit = max(1, min(int(limit or 500), 1000))
+
+    async def fetch():
+        exchange_cls = getattr(ccxt, exchange_key, None)
+        if exchange_cls is None:
+            raise ValueError(f"Unknown exchange_id={exchange_id!r}")
+        exchange = exchange_cls({"enableRateLimit": True})
+        try:
+            markets = await exchange.load_markets()
+            if symbol_ccxt not in markets:
+                raise UnsupportedMarketError(f"{exchange_key} does not have market symbol {symbol_ccxt}")
+            return await exchange.fetch_trades(symbol_ccxt, limit=limit)
+        finally:
+            await _close_exchange_client(exchange)
+
+    try:
+        trades = asyncio.run(fetch())
+    except UnsupportedMarketError as exc:
+        return {"status": "unsupported", "exchange": exchange_key, "symbol": symbol_db, "error": str(exc)}
+
+    tick_rows: list[TickRecord] = []
+    for trade in trades or []:
+        ts_ms = trade.get("timestamp")
+        ts_value = trade.get("datetime")
+        if ts_ms is not None:
+            ts = datetime.fromtimestamp(float(ts_ms) / 1000.0, tz=timezone.utc)
+        elif ts_value:
+            ts = datetime.fromisoformat(str(ts_value).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+        else:
+            continue
+        price = trade.get("price")
+        amount = trade.get("amount")
+        if price is None or amount is None:
+            continue
+        tick_rows.append(
+            TickRecord(
+                time=ts,
+                price=float(price),
+                volume=float(amount),
+                side=str(trade.get("side") or "") or None,
+                exchange_trade_id=str(trade.get("id")) if trade.get("id") is not None else None,
+                is_aggregated=False,
+            )
+        )
+
+    imported = 0
+    with session_scope() as db:
+        asset = get_or_create_asset(db, symbol=symbol_db, exchange=exchange_key)
+        imported = bulk_insert_ticks(
+            db,
+            asset_id=asset.id,
+            rows=tick_rows,
+            ingest_source=f"{exchange_key}_recent_trades",
+        )
+
+    return {
+        "status": "success",
+        "exchange": exchange_key,
+        "symbol": symbol_db,
+        "fetched": len(trades or []),
+        "imported": imported,
+    }
+
+
+@celery_app.task
+def schedule_tiered_rest_gap_fills_task(limit: int = 50):
+    from app.config import settings
+    from app.models.research import StreamTarget
+
+    if not settings.TIER2_REST_GAP_FILL_ENABLED:
+        return {"status": "disabled", "reason": "TIER2_REST_GAP_FILL_ENABLED is false."}
+
+    limit = max(1, min(int(limit or 50), 500))
+    queued = []
+    with session_scope() as db:
+        targets = (
+            db.query(StreamTarget)
+            .filter(
+                StreamTarget.source_type == "cex",
+                StreamTarget.user_preference != "blocked",
+                StreamTarget.coverage_tier.in_(["rest_gap_fill", "ohlcv_only"]),
+            )
+            .order_by(StreamTarget.coverage_tier.asc(), StreamTarget.score.desc())
+            .limit(limit)
+            .all()
+        )
+        for target in targets:
+            if target.coverage_tier == "rest_gap_fill":
+                task = ingest_recent_trades_task.delay(
+                    symbol=target.symbol,
+                    exchange_id=target.exchange,
+                    limit=500,
+                )
+                kind = "recent_trades"
+            else:
+                task = backfill_historical_candles.delay(
+                    symbol=target.symbol,
+                    exchange_id=target.exchange,
+                    timeframe="1m",
+                    days=1,
+                )
+                kind = "ohlcv"
+            queued.append({"exchange": target.exchange, "symbol": target.symbol, "kind": kind, "task_id": task.id})
+    return {"status": "queued", "queued": len(queued), "tasks_sample": queued[:20]}
+
+
+@celery_app.task
+def ingest_dex_context_task(limit: int = 100):
+    from app.config import settings
+
+    if not settings.DEX_INGEST_ENABLED:
+        return {"status": "disabled", "reason": "DEX_INGEST_ENABLED is false."}
+
+    async def ingest() -> dict:
+        from app.connectors.dex import DeFiLlamaConnector, DexScreenerConnector, GeckoTerminalConnector
+        from app.models.research import DataSourceHealth, DexPool
+
+        now = datetime.now(timezone.utc)
+        limit_n = max(1, min(int(limit or 100), 500))
+        upserted = 0
+        errors: list[str] = []
+
+        async def mark(source: str, *, error: Exception | None = None, metadata: dict | None = None) -> None:
+            with session_scope() as db:
+                row = db.query(DataSourceHealth).filter(DataSourceHealth.source == source).first()
+                if row is None:
+                    row = DataSourceHealth(source=source, source_type="dex", enabled=True, rest_supported=True)
+                    db.add(row)
+                if error is None:
+                    row.last_success_at = now
+                    row.last_error = None
+                    row.metadata_json = {**(row.metadata_json or {}), **(metadata or {})}
+                else:
+                    row.last_error_at = now
+                    row.last_error = str(error)
+
+        try:
+            dexscreener = DexScreenerConnector()
+            profiles = await dexscreener.get_latest_token_profiles()
+            for profile in profiles[:limit_n]:
+                chain_id = str(profile.get("chainId") or profile.get("chain") or "").lower()
+                token_address = str(profile.get("tokenAddress") or profile.get("address") or "")
+                if not chain_id or not token_address:
+                    continue
+                try:
+                    pairs = await dexscreener.get_token_pairs(chain_id, token_address)
+                except Exception as exc:
+                    errors.append(f"dexscreener pairs {chain_id}:{token_address}: {exc}")
+                    continue
+                with session_scope() as db:
+                    for pair in pairs[:5]:
+                        pool_address = str(pair.get("pairAddress") or pair.get("address") or "")
+                        if not pool_address:
+                            continue
+                        row = (
+                            db.query(DexPool)
+                            .filter(
+                                DexPool.source == "dexscreener",
+                                DexPool.chain_id == chain_id,
+                                DexPool.pool_address == pool_address,
+                            )
+                            .first()
+                        )
+                        if row is None:
+                            row = DexPool(source="dexscreener", chain_id=chain_id, pool_address=pool_address)
+                            db.add(row)
+                        base = pair.get("baseToken") or {}
+                        quote = pair.get("quoteToken") or {}
+                        liquidity = pair.get("liquidity") or {}
+                        volume = pair.get("volume") or {}
+                        row.dex_id = pair.get("dexId")
+                        row.base_symbol = base.get("symbol")
+                        row.quote_symbol = quote.get("symbol")
+                        row.base_token_address = base.get("address")
+                        row.quote_token_address = quote.get("address")
+                        row.liquidity_usd = _float_or_none(liquidity.get("usd"))
+                        row.volume_24h = _float_or_none(volume.get("h24"))
+                        row.price_usd = _float_or_none(pair.get("priceUsd"))
+                        row.metadata_json = pair
+                        row.last_seen_at = now
+                        upserted += 1
+            await mark("dexscreener", metadata={"last_context_upserted": upserted, "last_profile_count": len(profiles)})
+        except Exception as exc:
+            errors.append(f"dexscreener: {exc}")
+            await mark("dexscreener", error=exc)
+
+        try:
+            gecko = GeckoTerminalConnector()
+            for network in ("eth", "solana", "base", "bsc"):
+                payload = await gecko.get_network_pools(network, page=1)
+                items = payload.get("data", []) if isinstance(payload, dict) else []
+                with session_scope() as db:
+                    for item in items[: max(1, limit_n // 4)]:
+                        attrs = item.get("attributes") or {}
+                        pool_address = str(attrs.get("address") or item.get("id") or "")
+                        if not pool_address:
+                            continue
+                        row = (
+                            db.query(DexPool)
+                            .filter(
+                                DexPool.source == "geckoterminal",
+                                DexPool.chain_id == network,
+                                DexPool.pool_address == pool_address,
+                            )
+                            .first()
+                        )
+                        if row is None:
+                            row = DexPool(source="geckoterminal", chain_id=network, pool_address=pool_address)
+                            db.add(row)
+                        row.dex_id = attrs.get("dex_id")
+                        row.base_symbol = attrs.get("base_token_symbol")
+                        row.quote_symbol = attrs.get("quote_token_symbol")
+                        row.liquidity_usd = _float_or_none(attrs.get("reserve_in_usd"))
+                        row.volume_24h = _float_or_none((attrs.get("volume_usd") or {}).get("h24"))
+                        row.price_usd = _float_or_none(attrs.get("base_token_price_usd"))
+                        row.metadata_json = item
+                        row.last_seen_at = now
+                        upserted += 1
+            await mark("geckoterminal", metadata={"last_context_upserted": upserted})
+        except Exception as exc:
+            errors.append(f"geckoterminal: {exc}")
+            await mark("geckoterminal", error=exc)
+
+        try:
+            defillama = DeFiLlamaConnector()
+            protocols = await defillama.get_protocols()
+            await mark("defillama", metadata={"last_protocol_count": len(protocols), "last_context_sampled_at": now.isoformat()})
+        except Exception as exc:
+            errors.append(f"defillama: {exc}")
+            await mark("defillama", error=exc)
+
+        return {"status": "ok" if not errors else "partial", "upserted": upserted, "errors": errors[:10]}
+
+    return asyncio.run(ingest())
 
 
 @celery_app.task

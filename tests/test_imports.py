@@ -66,6 +66,28 @@ def test_binance_vision_trade_mapping(tmp_path):
     assert ticks[0].exchange_trade_id == "100"
 
 
+def test_binance_vision_auto_detects_microsecond_timestamps(tmp_path):
+    path = tmp_path / "trades-us.csv"
+    rows = [
+        {
+            "tradeId": "101",
+            "price": "200",
+            "qty": "1.2",
+            "quoteQty": "240",
+            "time": "1735689600000000",
+            "isBuyerMaker": "false",
+            "isBestMatch": "true",
+        }
+    ]
+    _write_csv(path, rows, ["tradeId", "price", "qty", "quoteQty", "time", "isBuyerMaker", "isBestMatch"])
+
+    importer = trades_importer(path, symbol="BTC-USDT", exchange="binance")
+    ticks = list(importer.iter_ticks())
+    assert len(ticks) == 1
+    assert ticks[0].time == datetime(2025, 1, 1, tzinfo=timezone.utc)
+    assert ticks[0].side == "buy"
+
+
 def test_dukascopy_bi5_parser(tmp_path):
     base_time = datetime(2024, 1, 1, 12, tzinfo=timezone.utc)
     raw_records = b"".join(

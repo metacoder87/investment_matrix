@@ -8,6 +8,16 @@ from app.config import settings
 from app.redis_client import RedisClient
 from app.streaming.base_ws import BaseTradeStreamer
 from app.streaming.binance_ws import BinanceTradeStreamer
+from app.streaming.cex_ws import (
+    BitfinexTradeStreamer,
+    BitstampTradeStreamer,
+    BybitTradeStreamer,
+    CryptoComTradeStreamer,
+    GateTradeStreamer,
+    GeminiTradeStreamer,
+    KuCoinTradeStreamer,
+    OKXTradeStreamer,
+)
 from app.streaming.coinbase_ws import CoinbaseTradeStreamer
 from app.streaming.kraken_ws import KrakenTradeStreamer
 from app.streaming.publisher import RedisPublisher
@@ -37,15 +47,29 @@ async def _command_listener(redis, streamers: dict[str, BaseTradeStreamer]):
             action = data.get("action")
             
             if action == "subscribe":
-                symbol = data.get("symbol")
+                symbols = _command_symbols(data)
                 exchange = data.get("exchange", "COINBASE").upper()
                 
                 streamer = streamers.get(exchange)
-                if streamer and symbol:
-                    logger.info(f"Received dynamic subscription for {symbol} on {exchange}")
-                    await streamer.subscribe([symbol])
+                if streamer and symbols:
+                    logger.info(f"Received dynamic subscription for {symbols} on {exchange}")
+                    await streamer.subscribe(symbols)
                 else:
-                    logger.warning(f"No streamer found for exchange {exchange} or invalid symbol {symbol}")
+                    logger.warning(f"No streamer found for exchange {exchange} or invalid symbols {symbols}")
+            elif action == "unsubscribe":
+                symbols = _command_symbols(data)
+                exchange = data.get("exchange", "COINBASE").upper()
+                streamer = streamers.get(exchange)
+                if streamer and symbols:
+                    logger.info(f"Received dynamic unsubscription for {symbols} on {exchange}")
+                    await streamer.unsubscribe(symbols)
+            elif action == "replace_set":
+                symbols = _command_symbols(data)
+                exchange = data.get("exchange", "COINBASE").upper()
+                streamer = streamers.get(exchange)
+                if streamer:
+                    logger.info("Received dynamic replacement set for %s: %s symbols", exchange, len(symbols))
+                    await streamer.replace_set(symbols)
                     
         except Exception as e:
             logger.error(f"Error processing command: {e}")
@@ -79,9 +103,44 @@ async def run_all() -> None:
             streamer = KrakenTradeStreamer(symbols[: settings.STREAM_MAX_SYMBOLS_PER_EXCHANGE])
             streamers["KRAKEN"] = streamer
             tasks.append(asyncio.create_task(streamer.run_forever(publisher)))
+        elif exchange == "OKX":
+            streamer = OKXTradeStreamer(symbols[: settings.STREAM_MAX_SYMBOLS_PER_EXCHANGE])
+            streamers["OKX"] = streamer
+            tasks.append(asyncio.create_task(streamer.run_forever(publisher)))
+        elif exchange == "BYBIT":
+            streamer = BybitTradeStreamer(symbols[: settings.STREAM_MAX_SYMBOLS_PER_EXCHANGE])
+            streamers["BYBIT"] = streamer
+            tasks.append(asyncio.create_task(streamer.run_forever(publisher)))
+        elif exchange == "KUCOIN":
+            streamer = KuCoinTradeStreamer(symbols[: settings.STREAM_MAX_SYMBOLS_PER_EXCHANGE])
+            streamers["KUCOIN"] = streamer
+            tasks.append(asyncio.create_task(streamer.run_forever(publisher)))
+        elif exchange == "GATEIO":
+            streamer = GateTradeStreamer(symbols[: settings.STREAM_MAX_SYMBOLS_PER_EXCHANGE])
+            streamers["GATEIO"] = streamer
+            tasks.append(asyncio.create_task(streamer.run_forever(publisher)))
+        elif exchange == "BITFINEX":
+            streamer = BitfinexTradeStreamer(symbols[: settings.STREAM_MAX_SYMBOLS_PER_EXCHANGE])
+            streamers["BITFINEX"] = streamer
+            tasks.append(asyncio.create_task(streamer.run_forever(publisher)))
+        elif exchange == "CRYPTOCOM":
+            streamer = CryptoComTradeStreamer(symbols[: settings.STREAM_MAX_SYMBOLS_PER_EXCHANGE])
+            streamers["CRYPTOCOM"] = streamer
+            tasks.append(asyncio.create_task(streamer.run_forever(publisher)))
+        elif exchange == "GEMINI":
+            streamer = GeminiTradeStreamer(symbols[:1])
+            streamers["GEMINI"] = streamer
+            tasks.append(asyncio.create_task(streamer.run_forever(publisher)))
+        elif exchange == "BITSTAMP":
+            streamer = BitstampTradeStreamer(symbols[: settings.STREAM_MAX_SYMBOLS_PER_EXCHANGE])
+            streamers["BITSTAMP"] = streamer
+            tasks.append(asyncio.create_task(streamer.run_forever(publisher)))
             
         else:
-            raise SystemExit(f"Unsupported STREAM_EXCHANGE: {exchange!r} (supported: COINBASE,BINANCE,KRAKEN)")
+            raise SystemExit(
+                f"Unsupported STREAM_EXCHANGE: {exchange!r} "
+                "(supported: COINBASE,BINANCE,KRAKEN,OKX,BYBIT,KUCOIN,GATEIO,BITFINEX,CRYPTOCOM,GEMINI,BITSTAMP)"
+            )
 
     logger.info("Streamer started: exchanges=%s symbols=%s", ",".join(exchanges), ",".join([s.dash() for s in symbols]))
     
@@ -93,6 +152,15 @@ async def run_all() -> None:
 
 def main():
     asyncio.run(run_all())
+
+
+def _command_symbols(data: dict) -> list[str]:
+    if isinstance(data.get("symbols"), list):
+        return [str(symbol).strip().upper().replace("/", "-") for symbol in data["symbols"] if str(symbol).strip()]
+    symbol = data.get("symbol")
+    if symbol:
+        return [str(symbol).strip().upper().replace("/", "-")]
+    return []
 
 
 if __name__ == "__main__":

@@ -55,8 +55,21 @@ class CoinbaseTradeStreamer(BaseTradeStreamer):
         )
 
     def _make_subscription_payload(self, symbols: list[str]) -> dict | None:
+        for symbol in symbols:
+            if symbol not in self._product_ids:
+                self._product_ids.append(symbol)
         return {
             "type": "subscribe",
+            "product_ids": symbols,
+            "channels": ["matches"],
+        }
+
+    def _make_unsubscription_payload(self, symbols: list[str]) -> dict | None:
+        for symbol in symbols:
+            if symbol in self._product_ids:
+                self._product_ids.remove(symbol)
+        return {
+            "type": "unsubscribe",
             "product_ids": symbols,
             "channels": ["matches"],
         }

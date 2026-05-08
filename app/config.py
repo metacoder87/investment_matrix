@@ -52,6 +52,94 @@ class Settings(BaseSettings):
         default=25,
         description="Safety cap to avoid subscribing to too many symbols per exchange in the zero-cost default stack.",
     )
+    STREAM_DYNAMIC_ENABLED: bool = Field(
+        default=True,
+        description="Enable dynamic websocket target allocation and rebalance commands.",
+    )
+    STREAM_REBALANCE_SECONDS: int = Field(
+        default=60,
+        description="How often the dynamic websocket allocator recalculates active stream targets.",
+    )
+    STREAM_SOURCE_PRIORITY: str = Field(
+        default="kraken,coinbase,binance,okx,bybit,kucoin,gateio,bitfinex,cryptocom,gemini,bitstamp",
+        description="Comma-separated free data source priority for websocket market data allocation.",
+    )
+    STREAM_MAX_CONNECTIONS_PER_SOURCE: int = Field(
+        default=1,
+        description="Safety cap for websocket connections per public source.",
+    )
+    STREAM_MAX_MESSAGES_PER_SECOND_PER_SOURCE: float = Field(
+        default=250.0,
+        description="Capacity-aware safety cap for expected websocket messages/sec per source.",
+    )
+    STREAM_REDIS_MAX_PENDING: int = Field(
+        default=50_000,
+        description="Redis pending message count where stream allocation starts demoting non-critical symbols.",
+    )
+    STREAM_WRITER_MAX_LAG_SECONDS: int = Field(
+        default=120,
+        description="Writer lag threshold where stream allocation starts demoting non-critical symbols.",
+    )
+    STREAM_DB_PRESSURE_HIGH_WATERMARK: float = Field(
+        default=0.80,
+        description="Capacity pressure level where dynamic allocation shifts from tick streams toward lower-resolution tiers.",
+    )
+    INGEST_CAPACITY_MONITOR_SECONDS: int = Field(
+        default=60,
+        description="How often ingestion telemetry samples Redis, writer, and Timescale health.",
+    )
+    TIER2_REST_GAP_FILL_ENABLED: bool = Field(
+        default=True,
+        description="Enable scheduled free REST recent-trade/OHLCV fills for non-streamed coverage tiers.",
+    )
+    TIER2_REST_GAP_FILL_SECONDS: int = Field(
+        default=300,
+        description="How often Tier 2 REST gap-fill workers run.",
+    )
+    DEX_CONTEXT_REFRESH_SECONDS: int = Field(
+        default=900,
+        description="How often free DEX context/discovery workers run.",
+    )
+    MARKET_ACTIVATION_ENABLED: bool = Field(
+        default=True,
+        description="Enable broad conversion of discovered markets into tiered coverage candidates.",
+    )
+    MARKET_ACTIVATION_INTERVAL_SECONDS: int = Field(
+        default=600,
+        description="How often discovered markets are activated into tiered coverage.",
+    )
+    MARKET_ACTIVATION_BATCH_SIZE: int = Field(
+        default=5000,
+        description="Maximum discovered markets evaluated by one activation pass.",
+    )
+    MARKET_ACTIVATION_QUEUE_LIMIT: int = Field(
+        default=200,
+        description="Maximum REST/OHLCV coverage jobs queued by one activation pass.",
+    )
+    MARKET_ACTIVATION_BACKFILL_DAYS: int = Field(
+        default=7,
+        description="Initial OHLCV backfill window for newly activated markets.",
+    )
+    MARKET_ACTIVATION_TIMEFRAME: str = Field(
+        default="1m",
+        description="Default candle timeframe for broad market activation backfills.",
+    )
+    STREAM_USER_LOCKED_SYMBOLS: str = Field(
+        default="",
+        description="Comma-separated BASE-QUOTE symbols that should be streamed first when supported.",
+    )
+    STREAM_USER_BLOCKED_SYMBOLS: str = Field(
+        default="",
+        description="Comma-separated BASE-QUOTE symbols that should not be streamed dynamically.",
+    )
+    DEX_INGEST_ENABLED: bool = Field(
+        default=True,
+        description="Enable free DEX aggregator discovery/context ingestion.",
+    )
+    ONCHAIN_RPC_URLS: str = Field(
+        default="",
+        description="Optional comma-separated free RPC URLs for selected on-chain pool tailing.",
+    )
     PRICE_EXCHANGE_PRIORITY: str = Field(
         default="kraken,coinbase,binance",
         description="Comma-separated exchange priority list for price data when exchange is auto.",
@@ -113,6 +201,7 @@ class Settings(BaseSettings):
     CREW_TRIGGER_MONITOR_ENABLED: bool = False
     CREW_RESEARCH_INTERVAL_SECONDS: int = 1800
     CREW_TRIGGER_POLL_SECONDS: int = 5
+    CREW_FORMULA_LEARNING_INTERVAL_SECONDS: int = 3600
     CREW_BANKROLL_RESET_DRAWDOWN_PCT: float = 0.95
     CREW_DEFAULT_STARTING_BANKROLL: float = 10_000.0
 
@@ -161,6 +250,7 @@ class Settings(BaseSettings):
     # Optional API keys (plugins; keep empty by default for zero-cost core)
     NEWS_API_KEY: str = ""
     COINMARKETCAP_API_KEY: str = ""
+    COINGECKO_DEMO_API_KEY: str = ""
     FINANCIALMODELINGPREP_API_KEY: str = ""
     NEWSDATAIO_API_KEY: str = ""
     COINPAPRIKA_API_KEY: str = ""

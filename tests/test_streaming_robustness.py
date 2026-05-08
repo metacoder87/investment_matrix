@@ -4,6 +4,16 @@ from unittest.mock import AsyncMock, patch
 from app.streaming.binance_ws import BinanceTradeStreamer, get_binance_ws_url
 from app.streaming.kraken_ws import KrakenTradeStreamer
 from app.streaming.coinbase_ws import CoinbaseTradeStreamer
+from app.streaming.cex_ws import (
+    BitfinexTradeStreamer,
+    BitstampTradeStreamer,
+    BybitTradeStreamer,
+    CryptoComTradeStreamer,
+    GateTradeStreamer,
+    GeminiTradeStreamer,
+    KuCoinTradeStreamer,
+    OKXTradeStreamer,
+)
 from app.streaming.symbols import CanonicalSymbol
 from app.streaming.publisher import RedisPublisher
 
@@ -89,6 +99,34 @@ async def test_kraken_parsing(publisher, symbols):
     assert call_kwargs["amount"] == 1.5
     assert call_kwargs["side"] == "buy"
 
+
+@pytest.mark.asyncio
+async def test_kraken_v2_parsing(publisher, symbols):
+    streamer = KrakenTradeStreamer(symbols)
+
+    raw_msg = {
+        "channel": "trade",
+        "type": "update",
+        "data": [
+            {
+                "symbol": "BTC/USD",
+                "side": "sell",
+                "price": 50000.0,
+                "qty": 0.25,
+                "trade_id": 4665906,
+                "timestamp": "2023-09-25T07:49:37.708706Z",
+            }
+        ],
+    }
+
+    await streamer.process_message(raw_msg, publisher)
+
+    publisher.publish_trade.assert_called_once()
+    call_kwargs = publisher.publish_trade.call_args[1]
+    assert call_kwargs["exchange"] == "kraken"
+    assert call_kwargs["symbol"] == "BTC-USD"
+    assert call_kwargs["side"] == "sell"
+
 @pytest.mark.asyncio
 async def test_coinbase_parsing(publisher):
     # Coinbase legacy init uses list[str]
@@ -116,6 +154,120 @@ async def test_coinbase_parsing(publisher):
     assert call_kwargs["symbol"] == "BTC-USD"
     assert call_kwargs["price"] == 100.00
     assert call_kwargs["side"] == "buy"
+
+
+@pytest.mark.asyncio
+async def test_okx_trade_and_quote_parsing(publisher, symbols):
+    streamer = OKXTradeStreamer(symbols[:1])
+    await streamer.process_message(
+        {
+            "arg": {"channel": "trades", "instId": "BTC-USDT"},
+            "data": [{"instId": "BTC-USDT", "tradeId": "1", "px": "100", "sz": "0.2", "side": "buy", "ts": "1700000000000"}],
+        },
+        publisher,
+    )
+    publisher.publish_trade.assert_called_once()
+    assert publisher.publish_trade.call_args[1]["exchange"] == "okx"
+    assert publisher.publish_trade.call_args[1]["symbol"] == "BTC-USDT"
+
+    await streamer.process_message(
+        {
+            "arg": {"channel": "tickers", "instId": "BTC-USDT"},
+            "data": [{"instId": "BTC-USDT", "bidPx": "99", "askPx": "101", "bidSz": "1", "askSz": "2", "ts": "1700000000000"}],
+        },
+        publisher,
+    )
+    publisher.publish_quote.assert_called_once()
+    assert publisher.publish_quote.call_args[1]["bid"] == 99.0
+
+
+@pytest.mark.asyncio
+async def test_bybit_trade_parsing(publisher, symbols):
+    streamer = BybitTradeStreamer(symbols[:1])
+    await streamer.process_message(
+        {"topic": "publicTrade.BTCUSDT", "data": [{"T": 1700000000000, "s": "BTCUSDT", "S": "Sell", "v": "0.1", "p": "100", "i": "abc"}]},
+        publisher,
+    )
+    publisher.publish_trade.assert_called_once()
+    assert publisher.publish_trade.call_args[1]["exchange"] == "bybit"
+    assert publisher.publish_trade.call_args[1]["symbol"] == "BTC-USDT"
+    assert publisher.publish_trade.call_args[1]["side"] == "sell"
+
+
+@pytest.mark.asyncio
+async def test_gate_trade_parsing(publisher, symbols):
+    streamer = GateTradeStreamer(symbols[:1])
+    await streamer.process_message(
+        {
+            "channel": "spot.trades",
+            "event": "update",
+            "result": {"currency_pair": "BTC_USDT", "id": "1", "create_time_ms": 1700000000000, "side": "buy", "amount": "0.1", "price": "100"},
+        },
+        publisher,
+    )
+    publisher.publish_trade.assert_called_once()
+    assert publisher.publish_trade.call_args[1]["exchange"] == "gateio"
+    assert publisher.publish_trade.call_args[1]["symbol"] == "BTC-USDT"
+
+
+@pytest.mark.asyncio
+async def test_kucoin_trade_parsing(publisher, symbols):
+    streamer = KuCoinTradeStreamer(symbols[:1])
+    await streamer.process_message(
+        {
+            "type": "message",
+            "topic": "/market/match:BTC-USDT",
+            "data": {"symbol": "BTC-USDT", "tradeId": "1", "time": "1700000000000000000", "side": "buy", "size": "0.1", "price": "100"},
+        },
+        publisher,
+    )
+    publisher.publish_trade.assert_called_once()
+    assert publisher.publish_trade.call_args[1]["exchange"] == "kucoin"
+
+
+@pytest.mark.asyncio
+async def test_bitfinex_trade_parsing(publisher, symbols):
+    streamer = BitfinexTradeStreamer(symbols[:1])
+    await streamer.process_message({"event": "subscribed", "channel": "trades", "chanId": 10, "symbol": "tBTCUSD"}, publisher)
+    await streamer.process_message([10, "tu", [123, 1700000000000, -0.5, 100.0]], publisher)
+    publisher.publish_trade.assert_called_once()
+    assert publisher.publish_trade.call_args[1]["exchange"] == "bitfinex"
+    assert publisher.publish_trade.call_args[1]["side"] == "sell"
+
+
+@pytest.mark.asyncio
+async def test_cryptocom_trade_parsing(publisher, symbols):
+    streamer = CryptoComTradeStreamer(symbols[:1])
+    await streamer.process_message(
+        {"result": {"channel": "trade.BTC_USDT", "data": [{"d": "1", "t": 1700000000000, "p": "100", "q": "0.1", "side": "BUY"}]}},
+        publisher,
+    )
+    publisher.publish_trade.assert_called_once()
+    assert publisher.publish_trade.call_args[1]["exchange"] == "cryptocom"
+    assert publisher.publish_trade.call_args[1]["symbol"] == "BTC-USDT"
+
+
+@pytest.mark.asyncio
+async def test_gemini_trade_parsing(publisher, symbols):
+    streamer = GeminiTradeStreamer(symbols[:1])
+    await streamer.process_message(
+        {"type": "update", "symbol": "btcusd", "timestampms": 1700000000000, "events": [{"type": "trade", "tid": 1, "price": "100", "amount": "0.1", "makerSide": "bid"}]},
+        publisher,
+    )
+    publisher.publish_trade.assert_called_once()
+    assert publisher.publish_trade.call_args[1]["exchange"] == "gemini"
+
+
+@pytest.mark.asyncio
+async def test_bitstamp_trade_parsing(publisher, symbols):
+    streamer = BitstampTradeStreamer(symbols[:1])
+    await streamer.process_message(
+        {"event": "trade", "channel": "live_trades_btcusd", "data": {"id": 1, "microtimestamp": "1700000000000000", "amount": "0.1", "price": "100", "type": 0}},
+        publisher,
+    )
+    publisher.publish_trade.assert_called_once()
+    assert publisher.publish_trade.call_args[1]["exchange"] == "bitstamp"
+    assert publisher.publish_trade.call_args[1]["side"] == "buy"
 
 @pytest.mark.asyncio
 async def test_base_reconnection_logic():

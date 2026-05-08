@@ -95,3 +95,23 @@ class BinanceTradeStreamer(BaseTradeStreamer):
             "params": new_params,
             "id": int(time.time() * 1000),
         }
+
+    def _make_unsubscription_payload(self, symbols: list[str]) -> dict | None:
+        params: list[str] = []
+        for raw in symbols:
+            try:
+                sym = parse_symbol(raw)
+            except ValueError:
+                continue
+            market_id, stream = _to_stream_symbol(sym)
+            if stream in self._subscribe_params:
+                self._subscribe_params.remove(stream)
+            self._market_id_to_symbol.pop(market_id.upper(), None)
+            params.append(stream)
+        if not params:
+            return None
+        return {
+            "method": "UNSUBSCRIBE",
+            "params": params,
+            "id": int(time.time() * 1000),
+        }
