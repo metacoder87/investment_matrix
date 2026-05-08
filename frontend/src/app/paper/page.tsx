@@ -18,9 +18,13 @@ interface PaperAccount {
 interface PaperPosition {
     symbol: string;
     exchange: string;
+    side: string;
     quantity: number;
     avg_entry_price: number;
     last_price: number;
+    reserved_collateral?: number;
+    take_profit?: number | null;
+    stop_loss?: number | null;
 }
 
 interface PaperOrder {
@@ -49,6 +53,15 @@ interface PaperSchedule {
     last_run_at?: string | null;
 }
 
+const strategyDefaults: Record<string, string> = {
+    sma_cross: '{"short_window": 20, "long_window": 50}',
+    rsi: '{"length": 14, "buy_threshold": 30, "sell_threshold": 70}',
+    buy_hold: "{}",
+    formula_long_momentum: "{}",
+    formula_quick_short: "{}",
+    formula_dual_sleeve: "{}",
+};
+
 export default function PaperTradingPage() {
     const [accounts, setAccounts] = useState<PaperAccount[]>([]);
     const [selectedAccount, setSelectedAccount] = useState<number | null>(null);
@@ -64,7 +77,7 @@ export default function PaperTradingPage() {
     const [timeframe, setTimeframe] = useState("1m");
     const [lookback, setLookback] = useState(200);
     const [strategy, setStrategy] = useState("sma_cross");
-    const [strategyParams, setStrategyParams] = useState('{"short_window": 20, "long_window": 50}');
+    const [strategyParams, setStrategyParams] = useState(strategyDefaults.sma_cross);
 
     const [intervalSeconds, setIntervalSeconds] = useState(60);
     const [maxDrawdownPct, setMaxDrawdownPct] = useState<number | "">("");
@@ -357,12 +370,18 @@ export default function PaperTradingPage() {
                             />
                             <select
                                 value={strategy}
-                                onChange={(e) => setStrategy(e.target.value)}
+                                onChange={(e) => {
+                                    setStrategy(e.target.value);
+                                    setStrategyParams(strategyDefaults[e.target.value] || "{}");
+                                }}
                                 className="rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
                             >
                                 <option value="sma_cross">SMA Cross</option>
                                 <option value="rsi">RSI</option>
                                 <option value="buy_hold">Buy & Hold</option>
+                                <option value="formula_long_momentum">Formula Long Momentum</option>
+                                <option value="formula_quick_short">Formula Quick Short</option>
+                                <option value="formula_dual_sleeve">Formula Dual Sleeve</option>
                             </select>
                             <input
                                 value={strategyParams}

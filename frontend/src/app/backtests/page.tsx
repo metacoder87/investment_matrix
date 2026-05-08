@@ -5,7 +5,7 @@ import { FlaskConical, TrendingUp, BarChart3 } from "lucide-react";
 import MarketChart from "@/components/MarketChart";
 import { getApiBaseUrl } from "@/utils/api";
 
-type BacktestMetrics = Record<string, number | null>;
+type BacktestMetrics = Record<string, unknown>;
 
 interface BacktestResponse {
     run_id: number;
@@ -227,6 +227,9 @@ export default function BacktestsPage() {
                             <option value="sma_cross">SMA Cross</option>
                             <option value="rsi">RSI</option>
                             <option value="buy_hold">Buy & Hold</option>
+                            <option value="formula_long_momentum">Formula Long Momentum</option>
+                            <option value="formula_quick_short">Formula Quick Short</option>
+                            <option value="formula_dual_sleeve">Formula Dual Sleeve</option>
                         </select>
                     </div>
                     <div className="md:col-span-2">
@@ -328,9 +331,7 @@ export default function BacktestsPage() {
                                 {Object.entries(backtestResult.metrics || {}).map(([key, value]) => (
                                     <div key={key} className="rounded border border-white/5 bg-black/20 p-3">
                                         <div className="uppercase text-[10px] tracking-wide">{key.replace(/_/g, " ")}</div>
-                                        <div className="text-sm font-semibold text-white">
-                                            {typeof value === "number" ? value.toFixed(3) : value ?? "n/a"}
-                                        </div>
+                                        <div className="truncate text-sm font-semibold text-white">{formatMetricValue(value)}</div>
                                     </div>
                                 ))}
                             </div>
@@ -427,4 +428,11 @@ export default function BacktestsPage() {
             </section>
         </main>
     );
+}
+
+function formatMetricValue(value: unknown) {
+    if (typeof value === "number") return value.toFixed(3);
+    if (typeof value === "string") return value;
+    if (value === null || value === undefined) return "n/a";
+    return JSON.stringify(value);
 }

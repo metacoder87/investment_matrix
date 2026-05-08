@@ -82,12 +82,41 @@ interface ModelPerformance {
 
 interface NoTradeDiagnostics {
     active_thesis_count: number;
+    active_research_tasks?: {
+        id: number;
+        status: string;
+        max_symbols: number | null;
+        selected_symbols: string[];
+        summary: Record<string, unknown>;
+        created_at: string | null;
+    }[];
     latest_run: {
+        id: number;
+        status: string;
+        mode?: string;
+        max_symbols?: number | null;
+        selected_symbols?: string[];
+        summary: Record<string, unknown>;
+        created_at: string | null;
+    } | null;
+    latest_research_run?: {
         id: number;
         status: string;
         summary: Record<string, unknown>;
         created_at: string | null;
     } | null;
+    latest_formula_candidate?: {
+        exchange: string;
+        symbol: string;
+        side: string;
+        entry_score: number;
+        price: number | null;
+        created_at: string | null;
+    } | null;
+    latest_execution_blocker?: Partial<TraceEvent> | null;
+    open_position_count?: number;
+    unmanaged_position_count?: number;
+    latest_repaired_position?: Partial<TraceEvent> | null;
     latest_model_failure: {
         model: string;
         role: string;
@@ -129,6 +158,15 @@ interface PortfolioSummary {
     available_bankroll: number;
     invested_value: number;
     total_equity: number;
+    long_exposure: number;
+    short_exposure: number;
+    short_reserved_collateral: number;
+    long_unrealized_pnl: number;
+    short_unrealized_pnl: number;
+    sleeve_cash: Record<"long" | "short", number>;
+    sleeve_reserved_collateral: Record<"long" | "short", number>;
+    sleeve_pnl: Record<"long" | "short", number>;
+    sleeve_win_rates: Record<"long" | "short", number>;
     realized_pnl: number;
     unrealized_pnl: number;
     all_time_pnl: number;
@@ -157,6 +195,8 @@ interface Thesis {
     symbol: string;
     exchange: string;
     strategy_name: string;
+    side?: string | null;
+    sleeve?: string | null;
     confidence: number;
     thesis: string;
     risk_notes: string | null;
@@ -177,11 +217,20 @@ interface Position {
     id?: number;
     symbol: string;
     exchange: string;
+    side: string;
     quantity: number;
     avg_entry_price: number;
     last_price: number;
     market_value: number;
     cost_basis: number;
+    reserved_collateral: number;
+    take_profit?: number | null;
+    stop_loss?: number | null;
+    exit_health?: string | null;
+    exit_source?: string | null;
+    distance_to_take_profit_pct?: number | null;
+    distance_to_stop_loss_pct?: number | null;
+    equity_value?: number;
     unrealized_pnl: number;
     return_pct: number;
 }
@@ -210,6 +259,31 @@ interface StrategyPerformance {
     avg_return_pct: number;
     success_rate_pct: number;
     last_used_at: string | null;
+}
+
+interface FormulaConfig {
+    id: number;
+    name: string;
+    is_active: boolean;
+    authority_mode: "approval_required" | "auto_apply_bounded";
+    created_by: string;
+    parameters: Record<string, unknown>;
+    bounds: Record<string, { min: number; max: number }>;
+    created_at: string | null;
+    updated_at: string | null;
+}
+
+interface FormulaSuggestion {
+    id: number;
+    config_id: number;
+    status: string;
+    source: string;
+    proposed_parameters: Record<string, unknown>;
+    deterministic_evidence: Record<string, unknown>;
+    ai_notes: string | null;
+    applied_at: string | null;
+    created_at: string | null;
+    updated_at: string | null;
 }
 
 interface Lesson {
@@ -260,6 +334,7 @@ interface TraceEvent {
     symbol: string | null;
     event_type: string;
     status: string;
+    reason_code?: string;
     public_summary: string;
     rationale: string | null;
     blocker_reason: string | null;
@@ -279,6 +354,15 @@ const emptySummary: PortfolioSummary = {
     available_bankroll: 0,
     invested_value: 0,
     total_equity: 0,
+    long_exposure: 0,
+    short_exposure: 0,
+    short_reserved_collateral: 0,
+    long_unrealized_pnl: 0,
+    short_unrealized_pnl: 0,
+    sleeve_cash: { long: 0, short: 0 },
+    sleeve_reserved_collateral: { long: 0, short: 0 },
+    sleeve_pnl: { long: 0, short: 0 },
+    sleeve_win_rates: { long: 0, short: 0 },
     realized_pnl: 0,
     unrealized_pnl: 0,
     all_time_pnl: 0,
@@ -349,6 +433,8 @@ export default function CrewPage() {
     const [activity, setActivity] = useState<TraceEvent[]>([]);
     const [models, setModels] = useState<CrewModelsPayload | null>(null);
     const [diagnostics, setDiagnostics] = useState<NoTradeDiagnostics | null>(null);
+    const [formulaConfig, setFormulaConfig] = useState<FormulaConfig | null>(null);
+    const [formulaSuggestions, setFormulaSuggestions] = useState<FormulaSuggestion[]>([]);
     const [modelRouting, setModelRouting] = useState<Record<ModelRole, string>>(emptyModelRouting);
     const [modelRoutingDirty, setModelRoutingDirty] = useState(false);
     const [modelPerformance, setModelPerformance] = useState<ModelPerformance[]>([]);
@@ -395,7 +481,7 @@ export default function CrewPage() {
         if (!summary.settings.research_enabled) blockers.push("Research is paused for this user.");
         if (!summary.settings.trigger_monitor_enabled) blockers.push("Trigger monitoring is paused for this user.");
         if (!summary.settings.autonomous_enabled) blockers.push("Autonomous paper execution is paused.");
-        if (activeTheses.length === 0) blockers.push("No active thesis is waiting on an entry target.");
+        if (activeTheses.length === 0 && !(diagnostics?.active_research_tasks?.length)) blockers.push("No active thesis is waiting on an entry target.");
         activity.slice(0, 8).forEach((event) => {
             if (event.blocker_reason && !blockers.includes(event.blocker_reason)) blockers.push(event.blocker_reason);
         });
@@ -403,6 +489,7 @@ export default function CrewPage() {
     }, [
         activeTheses.length,
         activity,
+        diagnostics?.active_research_tasks,
         diagnostics?.blockers,
         runtime?.available,
         runtime?.enabled,
@@ -413,6 +500,9 @@ export default function CrewPage() {
         summary.settings.research_enabled,
         summary.settings.trigger_monitor_enabled,
     ]);
+    const formulaParameters = useMemo(() => asRecord(formulaConfig?.parameters), [formulaConfig]);
+    const longFormulaParameters = useMemo(() => asRecord(formulaParameters.long), [formulaParameters]);
+    const shortFormulaParameters = useMemo(() => asRecord(formulaParameters.short), [formulaParameters]);
 
     const loadDashboard = useCallback(async () => {
         const base = getApiBaseUrl();
@@ -432,6 +522,8 @@ export default function CrewPage() {
             modelsRes,
             modelPerformanceRes,
             diagnosticsRes,
+            formulaConfigRes,
+            formulaSuggestionsRes,
         ] = await Promise.all([
             fetchJson(`${base}/crew/runtime`),
             fetchJson(`${base}/crew/portfolio/summary`),
@@ -448,6 +540,8 @@ export default function CrewPage() {
             fetchJson(`${base}/crew/models`),
             fetchJson(`${base}/crew/model-performance`),
             fetchJson(`${base}/crew/no-trade-diagnostics`),
+            fetchJson(`${base}/crew/formula-config`),
+            fetchJson(`${base}/crew/formula-suggestions`),
         ]);
 
         if (!summaryRes.ok) {
@@ -469,6 +563,8 @@ export default function CrewPage() {
             modelsRes,
             modelPerformanceRes,
             diagnosticsRes,
+            formulaConfigRes,
+            formulaSuggestionsRes,
         ].filter((item) => !item.ok).map((item) => item.error);
         setDegraded(degradedMessages);
 
@@ -486,6 +582,8 @@ export default function CrewPage() {
         setAudit(asArray<AuditLog>(auditRes.value));
         setActivity(asArray<TraceEvent>(activityRes.value));
         setDiagnostics(normalizeDiagnostics(diagnosticsRes.value));
+        if (formulaConfigRes.ok) setFormulaConfig(normalizeFormulaConfig(formulaConfigRes.value));
+        setFormulaSuggestions(asArray<FormulaSuggestion>(formulaSuggestionsRes.value).map(normalizeFormulaSuggestion));
         if (modelsRes.ok) {
             const modelsPayload = normalizeModels(modelsRes.value);
             setModels(modelsPayload);
@@ -530,6 +628,57 @@ export default function CrewPage() {
         }
     };
 
+    const patchFormulaConfig = async (changes: Partial<FormulaConfig> & { parameters?: Record<string, unknown> }) => {
+        setLoading(true);
+        setError(null);
+        setNotice(null);
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/crew/formula-config`, {
+                method: "PATCH",
+                credentials: "include",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(changes),
+            });
+            if (!response.ok) throw new Error(await responseErrorMessage(response, "Unable to update formula settings."));
+            const payload = await response.json();
+            setFormulaConfig(normalizeFormulaConfig(payload));
+            setNotice("Formula settings updated. Future crew decisions will use the active deterministic config.");
+            await loadDashboard();
+        } catch (err) {
+            setError(err instanceof Error ? err.message : "Unable to update formula settings.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const patchFormulaParameter = async (path: string, value: string) => {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) {
+            setError("Formula setting must be a number.");
+            return;
+        }
+        await patchFormulaConfig({ parameters: buildNestedPatch(path, numeric) });
+    };
+
+    const handleSuggestion = async (suggestionId: number, action: "approve" | "reject") => {
+        setLoading(true);
+        setError(null);
+        setNotice(null);
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/crew/formula-suggestions/${suggestionId}/${action}`, {
+                method: "POST",
+                credentials: "include",
+            });
+            if (!response.ok) throw new Error(await responseErrorMessage(response, `Unable to ${action} formula suggestion.`));
+            setNotice(action === "approve" ? "Formula suggestion approved and applied." : "Formula suggestion rejected.");
+            await loadDashboard();
+        } catch (err) {
+            setError(err instanceof Error ? err.message : `Unable to ${action} formula suggestion.`);
+        } finally {
+            setLoading(false);
+        }
+    };
+
     const startBot = async () => {
         setLoading(true);
         setError(null);
@@ -541,7 +690,7 @@ export default function CrewPage() {
             });
             if (!response.ok) throw new Error(await responseErrorMessage(response, "Unable to start AI bot."));
             const payload = await response.json();
-            setNotice(`AI bot started on ${(payload.primary_exchange || primaryExchange).toUpperCase()}. Immediate research task queued.`);
+            setNotice(`AI bot started on ${(payload.primary_exchange || primaryExchange).toUpperCase()}. Formula-first research run #${payload.run_id || "new"} queued.`);
             await loadDashboard();
         } catch (err) {
             setError(err instanceof Error ? err.message : "Unable to start AI bot.");
@@ -605,9 +754,12 @@ export default function CrewPage() {
             const runResponse = await fetch(`${base}/crew/research/run-now`, {
                 method: "POST",
                 credentials: "include",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ max_symbols: 3, execute_immediate: true }),
             });
             if (!runResponse.ok) throw new Error(await responseErrorMessage(runResponse, "Models saved and tested, but research could not be queued."));
-            setNotice("Model routing saved, thesis/trade probes passed, and immediate research was queued.");
+            const queued = await runResponse.json();
+            setNotice(`Model routing saved. Formula-first paper research run #${queued.run_id} was queued for ${queued.max_symbols} symbols.`);
             setModelTestStatus(null);
             await loadDashboard();
         } catch (err) {
@@ -680,10 +832,35 @@ export default function CrewPage() {
             if (!result.ok) {
                 throw new Error(result.message || "The selected thesis model could not produce a valid dry-run thesis.");
             }
-            setNotice(`${result.model} produced a valid ${result.exchange?.toUpperCase()}:${result.symbol} thesis dry-run.`);
+            setNotice(`${result.model} produced a valid ${result.exchange?.toUpperCase()}:${result.symbol} thesis dry-run. Dry-run validates thesis JSON only; no paper trade is created.`);
             await loadDashboard();
         } catch (err) {
             setError(err instanceof Error ? err.message : "Unable to run thesis dry-run.");
+            await loadDashboard();
+        } finally {
+            setModelTestStatus(null);
+            setLoading(false);
+        }
+    };
+
+    const runPaperTradeNow = async () => {
+        setLoading(true);
+        setError(null);
+        setNotice(null);
+        setModelTestStatus("Queueing one-symbol formula-first paper run...");
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/crew/research/run-now`, {
+                method: "POST",
+                credentials: "include",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ max_symbols: 1, execute_immediate: true }),
+            });
+            if (!response.ok) throw new Error(await responseErrorMessage(response, "Unable to queue formula-first paper run."));
+            const result = await response.json();
+            setNotice(`Formula-first paper run #${result.run_id} queued for one symbol. The dashboard will show the paper order when guardrails pass.`);
+            await loadDashboard();
+        } catch (err) {
+            setError(err instanceof Error ? err.message : "Unable to queue formula-first paper run.");
             await loadDashboard();
         } finally {
             setModelTestStatus(null);
@@ -783,7 +960,8 @@ export default function CrewPage() {
             <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <Metric icon={Wallet} label="Available bankroll" value={formatCurrency(summary.available_bankroll)} />
                 <Metric icon={LineChart} label="Total equity" value={formatCurrency(summary.total_equity)} delta={summary.current_cycle_pnl} />
-                <Metric icon={Target} label="Amount invested" value={formatCurrency(summary.invested_value)} />
+                <Metric icon={Target} label="Long exposure" value={formatCurrency(summary.long_exposure)} />
+                <Metric icon={Target} label="Short exposure" value={formatCurrency(summary.short_exposure)} />
                 <Metric icon={AlertTriangle} label="Drawdown" value={`${summary.drawdown_pct.toFixed(2)}%`} />
                 <Metric icon={ShieldCheck} label="All-time PnL" value={formatCurrency(summary.all_time_pnl)} delta={summary.all_time_pnl} />
                 <Metric icon={Bot} label="AI win rate" value={`${winRate.toFixed(1)}%`} />
@@ -888,8 +1066,85 @@ export default function CrewPage() {
                 </Panel>
             </section>
 
+            <section className="grid gap-4 xl:grid-cols-[1fr_1fr]">
+                <Panel title="Formula Settings">
+                    <div className="space-y-4 p-5">
+                        <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-white/10 bg-black/30 p-3">
+                            <div>
+                                <div className="text-sm font-medium text-white">{formulaConfig?.name || "Formula v1"}</div>
+                                <div className="text-xs text-gray-500">Active deterministic config</div>
+                            </div>
+                            <select
+                                value={formulaConfig?.authority_mode || "approval_required"}
+                                onChange={(event) => patchFormulaConfig({ authority_mode: event.target.value as FormulaConfig["authority_mode"] })}
+                                className="rounded border border-white/10 bg-black/50 px-3 py-2 text-sm text-white outline-none focus:border-cyan-400"
+                                aria-label="Formula authority mode"
+                            >
+                                <option value="approval_required">Require approval</option>
+                                <option value="auto_apply_bounded">Auto-apply bounded</option>
+                            </select>
+                        </div>
+                        <div className="grid gap-3 md:grid-cols-2">
+                            <FormulaInput label="Entry floor" value={num(formulaParameters.entry_score_floor, 0.5)} step="0.01" onCommit={(value) => patchFormulaParameter("entry_score_floor", value)} />
+                            <FormulaInput label="Full size score" value={num(formulaParameters.full_size_score, 0.6)} step="0.01" onCommit={(value) => patchFormulaParameter("full_size_score", value)} />
+                            <FormulaInput label="ATR length" value={num(formulaParameters.atr_length, 14)} step="1" onCommit={(value) => patchFormulaParameter("atr_length", value)} />
+                            <FormulaInput label="RSI length" value={num(formulaParameters.rsi_length, 14)} step="1" onCommit={(value) => patchFormulaParameter("rsi_length", value)} />
+                            <FormulaInput label="Long target ATR" value={num(longFormulaParameters.target_atr_multiplier, 2)} step="0.05" onCommit={(value) => patchFormulaParameter("long.target_atr_multiplier", value)} />
+                            <FormulaInput label="Short target ATR" value={num(shortFormulaParameters.target_atr_multiplier, 1.4)} step="0.05" onCommit={(value) => patchFormulaParameter("short.target_atr_multiplier", value)} />
+                            <FormulaInput label="Long min profit" value={num(longFormulaParameters.min_profit_pct, 0.012)} step="0.001" onCommit={(value) => patchFormulaParameter("long.min_profit_pct", value)} />
+                            <FormulaInput label="Short min profit" value={num(shortFormulaParameters.min_profit_pct, 0.006)} step="0.001" onCommit={(value) => patchFormulaParameter("short.min_profit_pct", value)} />
+                        </div>
+                        <div className="rounded border border-white/10 bg-black/20 p-3 text-xs text-gray-400">
+                            <span className="text-gray-500">Decision path</span>
+                            <span className="ml-2 text-gray-200">Formula, backtests, guardrails</span>
+                        </div>
+                    </div>
+                </Panel>
+
+                <Panel title="Formula Suggestions">
+                    <div className="max-h-[430px] divide-y divide-white/5 overflow-y-auto">
+                        {formulaSuggestions.length === 0 ? (
+                            <Empty text="No formula tuning suggestions." />
+                        ) : formulaSuggestions.map((suggestion) => (
+                            <div key={suggestion.id} className="space-y-3 px-5 py-4">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div>
+                                        <div className="font-medium text-white">{humanize(suggestion.source)}</div>
+                                        <div className="text-xs text-gray-500">{formatDate(suggestion.created_at)}</div>
+                                    </div>
+                                    <StatusPill status={suggestion.status} />
+                                </div>
+                                <p className="text-sm text-gray-300">{suggestion.ai_notes || "No notes recorded."}</p>
+                                <div className="grid grid-cols-2 gap-3 text-sm">
+                                    <Info label="Win rate" value={`${(num(suggestion.deterministic_evidence.win_rate) * 100).toFixed(1)}%`} />
+                                    <Info label="Avg return" value={`${num(suggestion.deterministic_evidence.avg_return_pct).toFixed(2)}%`} />
+                                </div>
+                                {suggestion.status === "pending" ? (
+                                    <div className="grid gap-2 sm:grid-cols-2">
+                                        <button
+                                            onClick={() => handleSuggestion(suggestion.id, "approve")}
+                                            disabled={loading}
+                                            className="rounded border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm font-medium text-emerald-100 hover:bg-emerald-500/20 disabled:opacity-50"
+                                        >
+                                            Approve
+                                        </button>
+                                        <button
+                                            onClick={() => handleSuggestion(suggestion.id, "reject")}
+                                            disabled={loading}
+                                            className="rounded border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-gray-100 hover:bg-white/10 disabled:opacity-50"
+                                        >
+                                            Reject
+                                        </button>
+                                    </div>
+                                ) : null}
+                            </div>
+                        ))}
+                    </div>
+                </Panel>
+            </section>
+
             <section className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
-                <Panel title="Crew Models">
+                <Panel title="AI Notes Models">
                     <div className="space-y-4 p-5">
                         <div className="rounded border border-white/10 bg-black/30 p-3 text-sm">
                             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -955,6 +1210,14 @@ export default function CrewPage() {
                                 <Target className="h-4 w-4" />
                                 Run thesis dry-run
                             </button>
+                            <button
+                                onClick={runPaperTradeNow}
+                                disabled={loading}
+                                className="inline-flex w-full items-center justify-center gap-2 rounded border border-green-500/40 bg-green-500/10 px-3 py-2 text-sm font-medium text-green-100 hover:bg-green-500/20 disabled:opacity-50 sm:col-span-2"
+                            >
+                                <Play className="h-4 w-4" />
+                                Run paper trade now
+                            </button>
                         </div>
                         <button
                             onClick={saveTestAndRunModels}
@@ -994,9 +1257,24 @@ export default function CrewPage() {
                             <StatusPill status={summary.settings.trade_cadence_mode || "aggressive_paper"} />
                             <span className="text-xs text-gray-500">{activeTheses.length} active theses</span>
                         </div>
+                        {diagnostics?.active_research_tasks?.length ? (
+                            <div className="rounded border border-cyan-500/20 bg-cyan-500/10 p-3 text-sm text-cyan-100">
+                                Research run #{diagnostics.active_research_tasks[0].id} is {diagnostics.active_research_tasks[0].status}.
+                                {typeof diagnostics.active_research_tasks[0].summary?.current_symbol === "string"
+                                    ? ` Current symbol: ${diagnostics.active_research_tasks[0].summary.current_symbol}.`
+                                    : " Waiting for the worker to pick it up."}
+                            </div>
+                        ) : null}
+                        {diagnostics?.latest_formula_candidate ? (
+                            <div className="rounded border border-white/10 bg-black/30 p-3 text-sm text-gray-200">
+                                Latest formula candidate: {diagnostics.latest_formula_candidate.exchange.toUpperCase()}:{diagnostics.latest_formula_candidate.symbol}
+                                {" "}{diagnostics.latest_formula_candidate.side.toUpperCase()} score {diagnostics.latest_formula_candidate.entry_score.toFixed(2)}
+                                {" "}at {formatPrice(diagnostics.latest_formula_candidate.price)}.
+                            </div>
+                        ) : null}
                         {currentBlockers.length === 0 ? (
                             <div className="rounded border border-green-500/20 bg-green-500/10 p-3 text-sm text-green-100">
-                                No current blocker found. The monitor is waiting for target prices or the next scheduler tick.
+                                No current blocker found. Formula-first research will create and execute paper entries when data, backtest, and position guardrails pass.
                             </div>
                         ) : (
                             <div className="space-y-2">
@@ -1012,9 +1290,25 @@ export default function CrewPage() {
                                 {diagnostics.recommended_action}
                             </div>
                         ) : null}
+                        {diagnostics?.open_position_count ? (
+                            <div className="rounded border border-white/10 bg-black/20 p-3 text-xs text-gray-300">
+                                Open paper positions: {diagnostics.open_position_count}
+                                {diagnostics.unmanaged_position_count ? ` / ${diagnostics.unmanaged_position_count} need exit repair` : " / exit plans managed"}
+                            </div>
+                        ) : null}
+                        {diagnostics?.latest_repaired_position ? (
+                            <div className="rounded border border-emerald-500/20 bg-emerald-500/10 p-3 text-xs text-emerald-100">
+                                Latest exit repair: {diagnostics.latest_repaired_position.symbol || "position"} / {String(asRecord(diagnostics.latest_repaired_position.evidence).exit_source || "formula")}
+                            </div>
+                        ) : null}
                         {diagnostics?.latest_model_failure ? (
                             <div className="rounded border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-100">
                                 Latest model issue: {diagnostics.latest_model_failure.role} / {diagnostics.latest_model_failure.model} / {diagnostics.latest_model_failure.status}
+                            </div>
+                        ) : null}
+                        {diagnostics?.latest_execution_blocker?.blocker_reason ? (
+                            <div className="rounded border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-100">
+                                Latest execution blocker: {diagnostics.latest_execution_blocker.blocker_reason}
                             </div>
                         ) : null}
                     </div>
@@ -1170,14 +1464,28 @@ export default function CrewPage() {
                         {positions.length === 0 ? (
                             <Empty text="The AI team does not currently own any paper assets." />
                         ) : positions.map((position) => (
-                            <div key={`${position.exchange}:${position.symbol}`} className="grid gap-3 px-5 py-4 md:grid-cols-[1fr_0.8fr_0.8fr_0.8fr] md:items-center">
+                            <div key={`${position.exchange}:${position.symbol}`} className="grid gap-3 px-5 py-4 md:grid-cols-[1fr_0.75fr_0.75fr_0.7fr_1fr] md:items-center">
                                 <div>
                                     <div className="font-medium text-white">{position.symbol}</div>
-                                    <div className="text-xs text-gray-500">{position.quantity.toFixed(6)} units</div>
+                                    <div className="text-xs text-gray-500">
+                                        {(position.side || "long").toUpperCase()} / {position.quantity.toFixed(6)} units
+                                    </div>
                                 </div>
-                                <Info label="Market value" value={formatCurrency(position.market_value)} />
+                                <Info
+                                    label={position.side === "short" ? "Collateral" : "Market value"}
+                                    value={formatCurrency(position.side === "short" ? position.reserved_collateral : position.market_value)}
+                                />
                                 <Info label="Unrealized" value={formatCurrency(position.unrealized_pnl)} />
                                 <Info label="Return" value={`${position.return_pct.toFixed(2)}%`} />
+                                <div className="text-sm">
+                                    <div className="text-xs uppercase tracking-wide text-gray-500">Exit plan</div>
+                                    <div className="font-medium text-gray-100">
+                                        {humanize(position.exit_health || "missing")} / {humanize(position.exit_source || "unknown")}
+                                    </div>
+                                    <div className="mt-1 text-xs text-gray-500">
+                                        TP {formatPrice(position.take_profit)} ({formatTargetDistance(position.distance_to_take_profit_pct)}) / SL {formatPrice(position.stop_loss)} ({formatTargetDistance(position.distance_to_stop_loss_pct)})
+                                    </div>
+                                </div>
                             </div>
                         ))}
                     </div>
@@ -1291,6 +1599,20 @@ function str(value: unknown, fallback = "") {
     return typeof value === "string" ? value : fallback;
 }
 
+function buildNestedPatch(path: string, value: number): Record<string, unknown> {
+    const parts = path.split(".").filter(Boolean);
+    if (!parts.length) return {};
+    const root: Record<string, unknown> = {};
+    let cursor = root;
+    parts.slice(0, -1).forEach((part) => {
+        const next: Record<string, unknown> = {};
+        cursor[part] = next;
+        cursor = next;
+    });
+    cursor[parts[parts.length - 1]] = value;
+    return root;
+}
+
 function normalizeSummary(value: unknown): PortfolioSummary {
     const raw = asRecord(value);
     const rawSettings = asRecord(raw.settings);
@@ -1302,6 +1624,27 @@ function normalizeSummary(value: unknown): PortfolioSummary {
         available_bankroll: num(raw.available_bankroll),
         invested_value: num(raw.invested_value),
         total_equity: num(raw.total_equity),
+        long_exposure: num(raw.long_exposure),
+        short_exposure: num(raw.short_exposure),
+        short_reserved_collateral: num(raw.short_reserved_collateral),
+        long_unrealized_pnl: num(raw.long_unrealized_pnl),
+        short_unrealized_pnl: num(raw.short_unrealized_pnl),
+        sleeve_cash: {
+            long: num(asRecord(raw.sleeve_cash).long),
+            short: num(asRecord(raw.sleeve_cash).short),
+        },
+        sleeve_reserved_collateral: {
+            long: num(asRecord(raw.sleeve_reserved_collateral).long),
+            short: num(asRecord(raw.sleeve_reserved_collateral).short),
+        },
+        sleeve_pnl: {
+            long: num(asRecord(raw.sleeve_pnl).long),
+            short: num(asRecord(raw.sleeve_pnl).short),
+        },
+        sleeve_win_rates: {
+            long: num(asRecord(raw.sleeve_win_rates).long),
+            short: num(asRecord(raw.sleeve_win_rates).short),
+        },
         realized_pnl: num(raw.realized_pnl),
         unrealized_pnl: num(raw.unrealized_pnl),
         all_time_pnl: num(raw.all_time_pnl),
@@ -1390,12 +1733,62 @@ function normalizeDiagnostics(value: unknown): NoTradeDiagnostics | null {
     if (!Object.keys(raw).length) return null;
     const latestRun = asRecord(raw.latest_run);
     const latestFailure = asRecord(raw.latest_model_failure);
+    const formulaCandidate = asRecord(raw.latest_formula_candidate);
+    const executionBlocker = asRecord(raw.latest_execution_blocker);
+    const repairedPosition = asRecord(raw.latest_repaired_position);
     return {
         active_thesis_count: num(raw.active_thesis_count),
+        active_research_tasks: asArray(raw.active_research_tasks) as NoTradeDiagnostics["active_research_tasks"],
         latest_run: Object.keys(latestRun).length ? latestRun as NoTradeDiagnostics["latest_run"] : null,
+        latest_research_run: Object.keys(asRecord(raw.latest_research_run)).length
+            ? asRecord(raw.latest_research_run) as NoTradeDiagnostics["latest_research_run"]
+            : null,
+        latest_formula_candidate: Object.keys(formulaCandidate).length
+            ? formulaCandidate as NoTradeDiagnostics["latest_formula_candidate"]
+            : null,
+        latest_execution_blocker: Object.keys(executionBlocker).length
+            ? executionBlocker as NoTradeDiagnostics["latest_execution_blocker"]
+            : null,
+        open_position_count: num(raw.open_position_count),
+        unmanaged_position_count: num(raw.unmanaged_position_count),
+        latest_repaired_position: Object.keys(repairedPosition).length
+            ? repairedPosition as NoTradeDiagnostics["latest_repaired_position"]
+            : null,
         latest_model_failure: Object.keys(latestFailure).length ? latestFailure as NoTradeDiagnostics["latest_model_failure"] : null,
         blockers: asArray<string>(raw.blockers).filter((item) => typeof item === "string"),
         recommended_action: str(raw.recommended_action),
+    };
+}
+
+function normalizeFormulaConfig(value: unknown): FormulaConfig {
+    const raw = asRecord(value);
+    const authority = str(raw.authority_mode, "approval_required");
+    return {
+        id: num(raw.id),
+        name: str(raw.name, "Formula v1"),
+        is_active: Boolean(raw.is_active),
+        authority_mode: authority === "auto_apply_bounded" ? "auto_apply_bounded" : "approval_required",
+        created_by: str(raw.created_by, "system"),
+        parameters: asRecord(raw.parameters),
+        bounds: asRecord(raw.bounds) as FormulaConfig["bounds"],
+        created_at: raw.created_at === null ? null : str(raw.created_at),
+        updated_at: raw.updated_at === null ? null : str(raw.updated_at),
+    };
+}
+
+function normalizeFormulaSuggestion(value: FormulaSuggestion): FormulaSuggestion {
+    const raw = asRecord(value);
+    return {
+        id: num(raw.id),
+        config_id: num(raw.config_id),
+        status: str(raw.status, "pending"),
+        source: str(raw.source, "deterministic_optimizer"),
+        proposed_parameters: asRecord(raw.proposed_parameters),
+        deterministic_evidence: asRecord(raw.deterministic_evidence),
+        ai_notes: raw.ai_notes === null ? null : str(raw.ai_notes),
+        applied_at: raw.applied_at === null ? null : str(raw.applied_at),
+        created_at: raw.created_at === null ? null : str(raw.created_at),
+        updated_at: raw.updated_at === null ? null : str(raw.updated_at),
     };
 }
 
@@ -1439,6 +1832,7 @@ function TraceRow({ event, debugOpen }: { event: TraceEvent; debugOpen: boolean 
                         <span className="text-xs text-gray-500">{event.role}</span>
                         {event.symbol ? <span className="font-mono text-xs text-cyan-200">{event.exchange?.toUpperCase()}:{event.symbol}</span> : null}
                         {event.llm_model ? <span className="font-mono text-xs text-purple-200">{event.model_role || "model"}: {event.llm_model}</span> : null}
+                        {event.reason_code ? <span className="font-mono text-xs text-gray-500">{event.reason_code}</span> : null}
                     </div>
                     <div className="mt-2 text-sm font-medium text-white">{event.public_summary}</div>
                 </div>
@@ -1522,13 +1916,29 @@ function Info({ label, value }: { label: string; value: string | number }) {
     );
 }
 
+function FormulaInput({ label, value, step, onCommit }: { label: string; value: number; step: string; onCommit: (value: string) => void }) {
+    return (
+        <label className="block rounded border border-white/10 bg-black/20 p-3">
+            <span className="text-[11px] uppercase text-gray-500">{label}</span>
+            <input
+                key={`${label}:${value}`}
+                type="number"
+                step={step}
+                defaultValue={value}
+                onBlur={(event) => onCommit(event.currentTarget.value)}
+                className="mt-2 w-full rounded border border-white/10 bg-black/50 px-3 py-2 text-sm text-white outline-none focus:border-cyan-400"
+            />
+        </label>
+    );
+}
+
 function Empty({ text }: { text: string }) {
     return <div className="px-5 py-8 text-sm text-gray-500">{text}</div>;
 }
 
 function StatusPill({ status }: { status: string }) {
     const tone =
-        ["executed", "completed", "available", "runtime_ready", "buy", "active", "entry_triggered"].includes(status)
+        ["executed", "completed", "available", "runtime_ready", "buy", "short", "cover", "active", "entry_triggered"].includes(status)
             ? "border-green-500/30 bg-green-500/10 text-green-200"
             : ["rejected", "failed", "unavailable", "stop_loss", "sell", "expired", "cancelled"].includes(status)
                 ? "border-red-500/30 bg-red-500/10 text-red-200"
@@ -1595,6 +2005,15 @@ function formatPrice(value: number | null | undefined) {
         currency: "USD",
         maximumFractionDigits: value > 100 ? 2 : 6,
     });
+}
+
+function formatTargetDistance(value: number | null | undefined) {
+    if (value === null || value === undefined) return "--";
+    return `${Number(value).toFixed(2)}%`;
+}
+
+function humanize(value: string) {
+    return value.replaceAll("_", " ");
 }
 
 function formatDate(value: string | null | undefined) {
