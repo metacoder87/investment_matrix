@@ -18,6 +18,8 @@ import {
 } from "lucide-react";
 import { getApiBaseUrl } from "@/utils/api";
 import { cn } from "@/utils/cn";
+import { Accordion } from "@/components/Accordion";
+import { DebugJson } from "@/components/DebugJson";
 
 interface RuntimeStatus {
     enabled: boolean;
@@ -1230,23 +1232,33 @@ export default function CrewPage() {
                     </div>
                 </Panel>
 
-                <Panel title="Downloaded Models">
-                    <div className="max-h-[520px] divide-y divide-white/5 overflow-y-auto">
-                        {!models?.models?.length ? (
-                            <Empty text="No downloaded Ollama models were returned. Check that Ollama is reachable from the backend." />
-                        ) : models.models.map((model) => (
-                            <div key={model.name} className="px-5 py-4">
-                                <div className="font-mono text-sm text-white">{model.name}</div>
-                                <div className="mt-1 flex flex-wrap gap-3 text-xs text-gray-500">
-                                    <span>{formatBytes(model.size)}</span>
-                                    {model.parameter_size ? <span>{model.parameter_size}</span> : null}
-                                    {model.quantization_level ? <span>{model.quantization_level}</span> : null}
-                                    {model.family ? <span>{model.family}</span> : null}
+                <Accordion
+                    title="Downloaded Models"
+                    summary={models?.models?.length ? `${models.models.length} models` : "0 models"}
+                    defaultOpen={false}
+                >
+                    <div className="space-y-3 p-5">
+                        <div className="text-xs text-gray-500">
+                            Ollama models available to the crew. Tap the View Debug button for the raw payload.
+                        </div>
+                        <div className="max-h-[420px] divide-y divide-white/5 overflow-y-auto rounded border border-white/10 bg-black/20 scrollbar-thin-cyan">
+                            {!models?.models?.length ? (
+                                <Empty text="No downloaded Ollama models were returned. Check that Ollama is reachable from the backend." />
+                            ) : models.models.map((model) => (
+                                <div key={model.name} className="px-4 py-3">
+                                    <div className="font-mono text-sm text-white">{model.name}</div>
+                                    <div className="mt-1 flex flex-wrap gap-3 text-xs text-gray-500">
+                                        <span>{formatBytes(model.size)}</span>
+                                        {model.parameter_size ? <span>{model.parameter_size}</span> : null}
+                                        {model.quantization_level ? <span>{model.quantization_level}</span> : null}
+                                        {model.family ? <span>{model.family}</span> : null}
+                                    </div>
                                 </div>
-                            </div>
-                        ))}
+                            ))}
+                        </div>
+                        <DebugJson value={models ?? {}} label="View Debug" maxHeight="20rem" />
                     </div>
-                </Panel>
+                </Accordion>
             </section>
 
             <section className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
@@ -1314,19 +1326,25 @@ export default function CrewPage() {
                     </div>
                 </Panel>
 
-                <Panel title="Decision Log">
+                <Accordion
+                    title="Decision Log"
+                    summary={activity.length ? `${activity.length} events` : "0 events"}
+                    defaultOpen={true}
+                    controls={
+                        <button
+                            onClick={() => setDebugOpen((value) => !value)}
+                            className="inline-flex items-center gap-2 rounded border border-primary/30 bg-primary/5 px-2.5 py-1 font-mono text-[11px] uppercase tracking-wider text-primary hover:bg-primary/10"
+                        >
+                            <Terminal className="h-3.5 w-3.5" />
+                            {debugOpen ? "Hide Debug" : "View Debug"}
+                        </button>
+                    }
+                >
                     <div className="p-5">
-                        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                            <div className="text-xs text-gray-500">Structured rationale, evidence, and blockers from the local AI team.</div>
-                            <button
-                                onClick={() => setDebugOpen((value) => !value)}
-                                className="inline-flex items-center gap-2 rounded border border-white/10 bg-white/5 px-3 py-2 text-xs text-gray-200 hover:bg-white/10"
-                            >
-                                <Terminal className="h-4 w-4" />
-                                {debugOpen ? "Hide debug JSON" : "Show debug JSON"}
-                            </button>
+                        <div className="mb-3 text-xs text-gray-500">
+                            Structured rationale, evidence, and blockers from the local AI team.
                         </div>
-                        <div className="max-h-[520px] space-y-3 overflow-y-auto pr-1">
+                        <div className="max-h-[520px] space-y-3 overflow-y-auto pr-1 scrollbar-thin-cyan">
                             {activity.length === 0 ? (
                                 <Empty text="No AI activity recorded yet. Start the bot or wait for the next scheduled research cycle." />
                             ) : activity.map((event) => (
@@ -1334,7 +1352,7 @@ export default function CrewPage() {
                             ))}
                         </div>
                     </div>
-                </Panel>
+                </Accordion>
             </section>
 
             <section className="grid gap-4 xl:grid-cols-[1fr_1fr]">
