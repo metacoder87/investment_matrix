@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useAuth } from "@/context/AuthContext";
 import {
     Activity,
     AlertTriangle,
@@ -67,13 +68,28 @@ function formatCurrency(value: number) {
 
 function safeFetch<T>(url: string): Promise<T | null> {
     return fetch(url, { credentials: "include" })
-        .then((r) => (r.ok ? (r.json() as Promise<T>) : null))
-        .catch(() => null);
+        .then((r) => {
+            if (!r.ok) {
+                // Log once per failed call so a quiet dashboard doesn't hide a broken backend.
+                if (typeof window !== "undefined") {
+                    console.warn(`[Dashboard] ${url} -> ${r.status}`);
+                }
+                return null;
+            }
+            return r.json() as Promise<T>;
+        })
+        .catch((err) => {
+            if (typeof window !== "undefined") {
+                console.warn(`[Dashboard] ${url} fetch failed`, err);
+            }
+            return null;
+        });
 }
 
 /* ---------- Dashboard ---------- */
 
 export default function DashboardPage() {
+    const { isAuthenticated, isLoading: authLoading } = useAuth();
     const [summary, setSummary] = useState<PortfolioSummary>(emptySummary);
     const [equity, setEquity] = useState<EquityPoint[]>([]);
     const [positions, setPositions] = useState<Position[]>([]);
@@ -96,8 +112,20 @@ export default function DashboardPage() {
     }, []);
 
     useEffect(() => {
+        // Don't poll until we know whether the user is logged in.
+        // Anonymous visitors at "/" would otherwise get a 401-loop on
+        // /crew/* endpoints every 30 seconds.
+        if (authLoading) return;
+        if (!isAuthenticated) {
+            setLoading(false);
+            return;
+        }
+
         let alive = true;
         const refresh = async () => {
+            // Skip work when the tab is in the background. A long-open tab
+            // shouldn't hammer the API just to keep stale numbers warm.
+            if (typeof document !== "undefined" && document.hidden) return;
             const { s, e, p, t, a } = await load();
             if (!alive) return;
             if (s) {
@@ -128,13 +156,23 @@ export default function DashboardPage() {
             if (Array.isArray(a)) setActivity(a);
             setLoading(false);
         };
+
         refresh();
         const id = window.setInterval(refresh, 30_000);
+
+        // When the tab returns to visible, refresh immediately so the user
+        // doesn't see stale data while waiting for the next tick.
+        const onVisible = () => {
+            if (!document.hidden) refresh();
+        };
+        document.addEventListener("visibilitychange", onVisible);
+
         return () => {
             alive = false;
             window.clearInterval(id);
+            document.removeEventListener("visibilitychange", onVisible);
         };
-    }, [load]);
+    }, [load, isAuthenticated, authLoading]);
 
     const winRate = useMemo(() => {
         const long = summary.sleeve_win_rates.long;

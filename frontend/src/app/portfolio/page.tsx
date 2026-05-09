@@ -64,10 +64,11 @@ export default function PortfolioPage() {
         }
     };
 
-    // Fetch specific portfolio details
-    const fetchPortfolio = async (portfolioId: number) => {
+    // Fetch specific portfolio details. Accepts an AbortSignal so an in-flight
+    // request can be cancelled when the user switches portfolios mid-fetch.
+    const fetchPortfolio = async (portfolioId: number, signal?: AbortSignal) => {
         try {
-            const res = await fetch(`${getApiBaseUrl()}/portfolio/${portfolioId}`);
+            const res = await fetch(`${getApiBaseUrl()}/portfolio/${portfolioId}`, { signal });
             if (res.ok) {
                 const data = await res.json();
                 setPortfolio(data);
@@ -75,6 +76,8 @@ export default function PortfolioPage() {
                 setPortfolio(null);
             }
         } catch (error) {
+            // Aborts are expected when the selection changes — don't log them.
+            if ((error as { name?: string })?.name === "AbortError") return;
             console.error(error);
         } finally {
             setIsLoading(false);
@@ -86,16 +89,32 @@ export default function PortfolioPage() {
         fetchPortfolioList();
     }, []);
 
-    // When selectedPortfolioId changes, fetch that portfolio
+    // When selectedPortfolioId changes, fetch that portfolio.
+    // Polling pauses when the tab is hidden, and any in-flight fetch is
+    // aborted when the selection changes (prevents a slow response for the
+    // old portfolio from clobbering state for the new one).
     useEffect(() => {
-        if (selectedPortfolioId !== null) {
-            setIsLoading(true);
-            fetchPortfolio(selectedPortfolioId);
+        if (selectedPortfolioId === null) return;
 
-            // Poll for updates (live PnL)
-            const interval = setInterval(() => fetchPortfolio(selectedPortfolioId), 5000);
-            return () => clearInterval(interval);
-        }
+        setIsLoading(true);
+        const controller = new AbortController();
+        fetchPortfolio(selectedPortfolioId, controller.signal);
+
+        const tick = () => {
+            if (document.hidden) return;
+            fetchPortfolio(selectedPortfolioId, controller.signal);
+        };
+        const interval = setInterval(tick, 15000); // was 5s — 3x reduction in load
+        const onVisible = () => {
+            if (!document.hidden) tick();
+        };
+        document.addEventListener("visibilitychange", onVisible);
+
+        return () => {
+            controller.abort();
+            clearInterval(interval);
+            document.removeEventListener("visibilitychange", onVisible);
+        };
     }, [selectedPortfolioId]);
 
     const handleCreatePortfolio = async () => {
