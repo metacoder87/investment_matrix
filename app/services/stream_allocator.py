@@ -20,7 +20,9 @@ from app.models.research import (
     ExchangeMarket,
     MarketQuote,
     StreamTarget,
+    AgentResearchThesis,
 )
+from app.models.paper import PaperPosition
 from app.redis_client import RedisClient
 from app.services.data_sources import configured_stream_sources, ensure_source_catalog, source_unavailable_reason
 from app.services.ingestion_telemetry import latest_capacity_snapshot
@@ -38,6 +40,15 @@ def allocate_stream_targets(db: Session, *, publish_commands: bool = False) -> d
     ensure_source_catalog(db)
     now = datetime.now(timezone.utc)
     locked = _symbol_set(settings.STREAM_USER_LOCKED_SYMBOLS)
+    
+    active_positions = db.query(PaperPosition).filter(PaperPosition.quantity > 0).all()
+    for pos in active_positions:
+        locked.add(pos.symbol.upper())
+        
+    active_theses = db.query(AgentResearchThesis).filter(AgentResearchThesis.status.in_(["open", "triggered"])).all()
+    for thesis in active_theses:
+        locked.add(thesis.symbol.upper())
+
     blocked = _symbol_set(settings.STREAM_USER_BLOCKED_SYMBOLS)
     source_order = configured_stream_sources()
     max_per_exchange = max(1, int(settings.STREAM_MAX_SYMBOLS_PER_EXCHANGE or 25))
