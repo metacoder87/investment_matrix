@@ -117,6 +117,8 @@ class ThesisDecision(BaseModel):
         return data
 
 
+
+
 class TradeApprovalDecision(BaseModel):
     decision: Literal["approve", "reject"]
     confidence: float = Field(ge=0, le=1)
@@ -152,11 +154,22 @@ class OllamaThesisClient:
         exchange: str | None = None,
         symbol: str | None = None,
     ) -> ThesisDecision:
+        if trade_cadence_mode == "aggressive_paper":
+            decision = build_formula_decision_from_snapshot(
+                snapshot,
+                snapshot.get("latest_price"),
+                snapshot,
+                reason="Deterministic Fast-Lane bypass."
+            )
+            if decision and decision.entry_score and decision.entry_score >= FORMULA_ENTRY_SCORE_FLOOR:
+                self.last_parsed_response = decision.model_dump()
+                self.last_raw_response = json.dumps(self.last_parsed_response)
+                self.last_prompt = "Deterministic Fast-Lane bypass."
+                return decision
+
         prompt = _build_thesis_prompt(snapshot, lessons, trade_cadence_mode=trade_cadence_mode)
         timeout_seconds = _llm_timeout_for("thesis", trade_cadence_mode)
         def _invoke(current_prompt: str):
-            self.last_prompt = current_prompt
-            self.last_raw_response = None
             self.last_parsed_response = None
             if self.db is not None and self.current_user is not None:
                 parsed, raw, invocation = invoke_ollama_json(
@@ -2292,8 +2305,8 @@ def _compute_fair_value_targets(
         price,
         float(atr or 0.0),
         "short" if side == "short" else "long",
-        target_atr_multiplier=1.4 if side == "short" else 2.0,
-        min_profit_pct=0.006 if side == "short" else 0.012,
+        target_atr_multiplier=1.0 if side == "short" else 2.0,
+        min_profit_pct=0.004 if side == "short" else 0.012,
     )
     fair_value = decision.fair_value or _compute_fair_value(signal, price)
     entry_score = (
