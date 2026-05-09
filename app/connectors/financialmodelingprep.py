@@ -1,5 +1,11 @@
+import logging
+
 import requests
+
 from app.config import settings
+
+logger = logging.getLogger(__name__)
+
 
 class FinancialModelingPrepConnector:
     def __init__(self):
@@ -16,9 +22,9 @@ class FinancialModelingPrepConnector:
             "apikey": self.api_key,
         }
         try:
-            response = requests.get(url, params=params)
+            response = requests.get(url, params=params, timeout=10)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"An error occurred while fetching news from Financial Modeling Prep: {e}")
+            logger.warning("FinancialModelingPrep fetch failed: %s", e)
             return None

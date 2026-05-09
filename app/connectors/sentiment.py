@@ -1,6 +1,10 @@
+import logging
+
 import httpx
 from app.config import settings
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 class StockgeistConnector:
     def __init__(self):
@@ -22,7 +26,7 @@ class StockgeistConnector:
                 response.raise_for_status()
                 return response.json()
         except Exception as e:
-            print(f"An error occurred while fetching sentiment from Stockgeist: {e}")
+            logger.warning("Stockgeist sentiment fetch failed: %s", e)
             return None
 
 class SantimentConnector:
@@ -55,7 +59,7 @@ class SantimentConnector:
             )
             return sentiment_data.to_json()
         except Exception as e:
-            print(f"An error occurred while fetching sentiment from Santiment: {e}")
+            logger.warning("Santiment sentiment fetch failed: %s", e)
             return None
 
 class LunarCrushConnector:
@@ -77,7 +81,7 @@ class LunarCrushConnector:
                 response.raise_for_status()
                 return response.json()
         except Exception as e:
-            print(f"An error occurred while fetching sentiment from LunarCrush: {e}")
+            logger.warning("LunarCrush sentiment fetch failed: %s", e)
             return None
 
 class CryptoCompareConnector:
@@ -100,7 +104,7 @@ class CryptoCompareConnector:
                 response.raise_for_status()
                 return response.json()
         except Exception as e:
-            print(f"An error occurred while fetching sentiment from CryptoCompare: {e}")
+            logger.warning("CryptoCompare sentiment fetch failed: %s", e)
             return None
 
 class FearAndGreedConnector:
@@ -127,7 +131,7 @@ class FearAndGreedConnector:
                     }
             return None
         except Exception as e:
-            print(f"Error fetching Fear & Greed index: {e}")
+            logger.warning("Fear & Greed index fetch failed: %s", e)
             return None
 
 class Sentiment:

@@ -1,4 +1,8 @@
+import logging
+
 from pycoingecko import CoinGeckoAPI
+
+logger = logging.getLogger(__name__)
 
 
 class CoinGeckoConnector:
@@ -22,7 +26,7 @@ class CoinGeckoConnector:
                 kwargs['vs_currency'] = 'usd'
             return client.get_coins_markets(**kwargs)
         except Exception as e:
-            print(f"Warning: CoinGecko API failed ({e}). Using fallback coin list.")
+            logger.warning("CoinGecko API failed (%s). Using fallback coin list.", e)
             return self._get_fallback_coins()
 
     def _get_fallback_coins(self):
@@ -97,7 +101,7 @@ class CoinGeckoConnector:
             client = CoinGeckoAPI()
             return client.get_coin_by_id(coin_id)
         except Exception as e:
-            print(f"An error occurred while fetching details for '{coin_id}' from CoinGecko: {e}")
+            logger.warning("CoinGecko get_coin_details('%s') failed: %s", coin_id, e)
             return None
 
     def ping(self) -> bool:
@@ -111,7 +115,7 @@ class CoinGeckoConnector:
             client = CoinGeckoAPI()
             return client.ping().get('gecko_says', '') == '(V3) To the Moon!'
         except Exception as e:
-            print(f"An error occurred while pinging CoinGecko API: {e}")
+            logger.warning("CoinGecko ping failed: %s", e)
             return False
 
     def get_status_updates(self, coin_id: str = None):
@@ -132,7 +136,7 @@ class CoinGeckoConnector:
             else:
                 return client.get_status_updates()
         except Exception as e:
-            print(f"An error occurred while fetching status updates from CoinGecko: {e}")
+            logger.warning("CoinGecko get_status_updates failed: %s", e)
             return []
 
     def get_coin_fundamentals(self, coin_id: str):

@@ -1,4 +1,8 @@
+import logging
+
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class NewsConnector:
@@ -36,7 +40,7 @@ class NewsConnector:
                 page_size=page_size,
             )
         except Exception as e:
-            print(f"An error occurred while fetching news from NewsAPI: {e}")
+            logger.warning("NewsAPI fetch failed: %s", e)
             if "401" in str(e):
-                print("Please ensure your NEWS_API_KEY is valid.")
+                logger.warning("NewsAPI returned 401; check NEWS_API_KEY validity.")
             return {"status": "error", "reason": str(e), "articles": []}
