@@ -20,6 +20,8 @@ import { getApiBaseUrl } from "@/utils/api";
 import { cn } from "@/utils/cn";
 import { Accordion } from "@/components/Accordion";
 import { DebugJson } from "@/components/DebugJson";
+import { PortfolioDonutChart } from "@/components/crew/PortfolioDonutChart";
+import { StrategyPerformanceBarChart } from "@/components/crew/StrategyPerformanceBarChart";
 
 interface RuntimeStatus {
     enabled: boolean;
@@ -446,6 +448,7 @@ export default function CrewPage() {
     const [error, setError] = useState<string | null>(null);
     const [notice, setNotice] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
+    const [activeTab, setActiveTab] = useState<"overview" | "portfolio" | "config" | "logs">("overview");
 
     const activeTheses = useMemo(() => theses.filter((item) => ["active", "entry_triggered"].includes(item.status)), [theses]);
     const currentStrategy = strategies[0]?.strategy_name || activeTheses[0]?.strategy_name || "No active strategy";
@@ -959,619 +962,622 @@ export default function CrewPage() {
                 </div>
             ) : null}
 
-            <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                <Metric icon={Wallet} label="Available bankroll" value={formatCurrency(summary.available_bankroll)} />
-                <Metric icon={LineChart} label="Total equity" value={formatCurrency(summary.total_equity)} delta={summary.current_cycle_pnl} />
-                <Metric icon={Target} label="Long exposure" value={formatCurrency(summary.long_exposure)} />
-                <Metric icon={Target} label="Short exposure" value={formatCurrency(summary.short_exposure)} />
-                <Metric icon={AlertTriangle} label="Drawdown" value={`${summary.drawdown_pct.toFixed(2)}%`} />
-                <Metric icon={ShieldCheck} label="All-time PnL" value={formatCurrency(summary.all_time_pnl)} delta={summary.all_time_pnl} />
-                <Metric icon={Bot} label="AI win rate" value={`${winRate.toFixed(1)}%`} />
-                <Metric icon={History} label="Bankroll resets" value={summary.reset_count} />
-                <Metric icon={CirclePause} label="Since reset" value={formatDuration(summary.seconds_since_last_reset)} />
-            </section>
+            {/* TAB BAR */}
+            <div className="flex border-b border-white/10 overflow-x-auto scrollbar-hide">
+                {(["overview", "portfolio", "config", "logs"] as const).map((tab) => (
+                    <button
+                        key={tab}
+                        onClick={() => setActiveTab(tab)}
+                        className={cn(
+                            "px-6 py-3 text-sm font-medium uppercase tracking-wider transition-colors",
+                            activeTab === tab
+                                ? "border-b-2 border-cyan-400 text-cyan-400"
+                                : "text-gray-500 hover:text-gray-300"
+                        )}
+                    >
+                        {tab}
+                    </button>
+                ))}
+            </div>
 
-            <section className="grid gap-4 xl:grid-cols-[1.3fr_0.7fr]">
-                <Panel title="Bankroll Curve">
-                    <div className="p-5">
-                        <DualLineChart
-                            points={equity.length ? equity : [{
-                                timestamp: new Date().toISOString(),
-                                cash_balance: summary.cash_balance,
-                                invested_value: summary.invested_value,
-                                equity: summary.total_equity,
-                                drawdown_pct: summary.drawdown_pct,
-                            }]}
-                        />
-                    </div>
-                </Panel>
+            {activeTab === "overview" && (
+                <div className="space-y-6">
+                    <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                        <Metric icon={Wallet} label="Available bankroll" value={formatCurrency(summary.available_bankroll)} />
+                        <Metric icon={LineChart} label="Total equity" value={formatCurrency(summary.total_equity)} delta={summary.current_cycle_pnl} />
+                        <Metric icon={Target} label="Long exposure" value={formatCurrency(summary.long_exposure)} />
+                        <Metric icon={Target} label="Short exposure" value={formatCurrency(summary.short_exposure)} />
+                        <Metric icon={AlertTriangle} label="Drawdown" value={`${summary.drawdown_pct.toFixed(2)}%`} />
+                        <Metric icon={ShieldCheck} label="All-time PnL" value={formatCurrency(summary.all_time_pnl)} delta={summary.all_time_pnl} />
+                        <Metric icon={Bot} label="AI win rate" value={`${winRate.toFixed(1)}%`} />
+                        <Metric icon={History} label="Bankroll resets" value={summary.reset_count} />
+                    </section>
 
-                <Panel title="Autonomy">
-                    <div className="space-y-4 p-5">
-                        <div className="rounded border border-white/10 bg-black/30 p-3">
-                            <div className="flex flex-wrap items-center justify-between gap-3">
-                                <div>
-                                    <div className="text-sm font-medium text-white">Bot state</div>
-                                    <div className="text-xs text-gray-500">Primary source and paper venue: {primaryExchange.toUpperCase()}</div>
-                                </div>
-                                <StatusPill status={botState.toLowerCase().replace(" ", "_")} />
+                    <section className="grid gap-4 xl:grid-cols-[1.3fr_0.7fr]">
+                        <Panel title="Bankroll Curve">
+                            <div className="p-5">
+                                <DualLineChart
+                                    points={equity.length ? equity : [{
+                                        timestamp: new Date().toISOString(),
+                                        cash_balance: summary.cash_balance,
+                                        invested_value: summary.invested_value,
+                                        equity: summary.total_equity,
+                                        drawdown_pct: summary.drawdown_pct,
+                                    }]}
+                                />
                             </div>
-                            <button
-                                onClick={backfillPrimaryExchange}
-                                disabled={loading}
-                                className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded border border-white/10 bg-white/5 px-3 py-2 text-sm text-gray-200 hover:bg-white/10 disabled:opacity-50"
-                            >
-                                <RefreshCcw className="h-4 w-4" />
-                                Backfill {primaryExchange.toUpperCase()} assets
-                            </button>
-                        </div>
-                        <div className="flex items-center justify-between gap-4">
-                            <div>
-                                <div className="text-sm font-medium text-white">Paper trading</div>
-                                <div className="text-xs text-gray-500">Execution after trigger and guardrail approval</div>
-                            </div>
-                            <Toggle
-                                enabled={summary.settings.autonomous_enabled}
-                                onClick={() => patchAutonomy({ autonomous_enabled: !summary.settings.autonomous_enabled })}
-                            />
-                        </div>
-                        <div className="flex items-center justify-between gap-4">
-                            <div>
-                                <div className="text-sm font-medium text-white">Research loop</div>
-                                <div className="text-xs text-gray-500">Every {Math.round(summary.settings.research_interval_seconds / 60)} minutes</div>
-                            </div>
-                            <Toggle
-                                enabled={summary.settings.research_enabled}
-                                onClick={() => patchAutonomy({ research_enabled: !summary.settings.research_enabled })}
-                            />
-                        </div>
-                        <div className="flex items-center justify-between gap-4">
-                            <div>
-                                <div className="text-sm font-medium text-white">Trigger monitor</div>
-                                <div className="text-xs text-gray-500">Entry, take-profit, and stop-loss targets</div>
-                            </div>
-                            <Toggle
-                                enabled={summary.settings.trigger_monitor_enabled}
-                                onClick={() => patchAutonomy({ trigger_monitor_enabled: !summary.settings.trigger_monitor_enabled })}
-                            />
-                        </div>
-                        <div className="grid grid-cols-2 gap-3 text-sm">
-                            <Info label="Max position" value={`${(summary.settings.max_position_pct * 100).toFixed(0)}%`} />
-                            <Info label="Open positions" value={`${summary.open_positions}/${summary.settings.max_open_positions}`} />
-                            <Info label="Daily loss cap" value={`${(summary.settings.max_daily_loss_pct * 100).toFixed(0)}%`} />
-                            <Info label="Trades/day" value={summary.settings.max_trades_per_day} />
-                            <Info label="Reset threshold" value={`${(summary.settings.bankroll_reset_drawdown_pct * 100).toFixed(0)}%`} />
-                            <Info label="Starting bankroll" value={formatCurrency(summary.settings.default_starting_bankroll)} />
-                        </div>
-                        <select
-                            value={summary.settings.ai_paper_account_id || summary.account_id || ""}
-                            onChange={(event) => patchAutonomy({ ai_paper_account_id: Number(event.target.value) })}
-                            className="w-full rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-cyan-400"
-                            aria-label="AI paper account"
-                        >
-                            {accounts.map((account) => (
-                                <option key={account.id} value={account.id}>{account.name}</option>
-                            ))}
-                        </select>
-                        <button
-                            onClick={manualReset}
-                            disabled={loading}
-                            className="inline-flex w-full items-center justify-center gap-2 rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm font-medium text-red-100 hover:bg-red-500/20 disabled:opacity-50"
-                        >
-                            <RefreshCcw className="h-4 w-4" />
-                            Reset bankroll
-                        </button>
-                        <div className="rounded border border-white/10 bg-black/30 p-3 text-xs text-gray-400">
-                            {runtime?.message || "Crew runtime has not reported status yet."}
-                        </div>
-                    </div>
-                </Panel>
-            </section>
+                        </Panel>
 
-            <section className="grid gap-4 xl:grid-cols-[1fr_1fr]">
-                <Panel title="Formula Settings">
-                    <div className="space-y-4 p-5">
-                        <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-white/10 bg-black/30 p-3">
-                            <div>
-                                <div className="text-sm font-medium text-white">{formulaConfig?.name || "Formula v1"}</div>
-                                <div className="text-xs text-gray-500">Active deterministic config</div>
-                            </div>
-                            <select
-                                value={formulaConfig?.authority_mode || "approval_required"}
-                                onChange={(event) => patchFormulaConfig({ authority_mode: event.target.value as FormulaConfig["authority_mode"] })}
-                                className="rounded border border-white/10 bg-black/50 px-3 py-2 text-sm text-white outline-none focus:border-cyan-400"
-                                aria-label="Formula authority mode"
-                            >
-                                <option value="approval_required">Require approval</option>
-                                <option value="auto_apply_bounded">Auto-apply bounded</option>
-                            </select>
-                        </div>
-                        <div className="grid gap-3 md:grid-cols-2">
-                            <FormulaInput label="Entry floor" value={num(formulaParameters.entry_score_floor, 0.5)} step="0.01" onCommit={(value) => patchFormulaParameter("entry_score_floor", value)} />
-                            <FormulaInput label="Full size score" value={num(formulaParameters.full_size_score, 0.6)} step="0.01" onCommit={(value) => patchFormulaParameter("full_size_score", value)} />
-                            <FormulaInput label="ATR length" value={num(formulaParameters.atr_length, 14)} step="1" onCommit={(value) => patchFormulaParameter("atr_length", value)} />
-                            <FormulaInput label="RSI length" value={num(formulaParameters.rsi_length, 14)} step="1" onCommit={(value) => patchFormulaParameter("rsi_length", value)} />
-                            <FormulaInput label="Long target ATR" value={num(longFormulaParameters.target_atr_multiplier, 2)} step="0.05" onCommit={(value) => patchFormulaParameter("long.target_atr_multiplier", value)} />
-                            <FormulaInput label="Short target ATR" value={num(shortFormulaParameters.target_atr_multiplier, 1.4)} step="0.05" onCommit={(value) => patchFormulaParameter("short.target_atr_multiplier", value)} />
-                            <FormulaInput label="Long min profit" value={num(longFormulaParameters.min_profit_pct, 0.012)} step="0.001" onCommit={(value) => patchFormulaParameter("long.min_profit_pct", value)} />
-                            <FormulaInput label="Short min profit" value={num(shortFormulaParameters.min_profit_pct, 0.006)} step="0.001" onCommit={(value) => patchFormulaParameter("short.min_profit_pct", value)} />
-                        </div>
-                        <div className="rounded border border-white/10 bg-black/20 p-3 text-xs text-gray-400">
-                            <span className="text-gray-500">Decision path</span>
-                            <span className="ml-2 text-gray-200">Formula, backtests, guardrails</span>
-                        </div>
-                    </div>
-                </Panel>
+                        <Panel title="Strategy Performance">
+                            <StrategyPerformanceBarChart strategies={strategies} />
+                        </Panel>
+                    </section>
 
-                <Panel title="Formula Suggestions">
-                    <div className="max-h-[430px] divide-y divide-white/5 overflow-y-auto">
-                        {formulaSuggestions.length === 0 ? (
-                            <Empty text="No formula tuning suggestions." />
-                        ) : formulaSuggestions.map((suggestion) => (
-                            <div key={suggestion.id} className="space-y-3 px-5 py-4">
-                                <div className="flex flex-wrap items-center justify-between gap-2">
+                    <section className="grid gap-4 xl:grid-cols-[1fr_1fr]">
+                        <Panel title="Current Strategy">
+                            <div className="space-y-4 p-5">
+                                <div className="flex flex-wrap items-center justify-between gap-3">
                                     <div>
-                                        <div className="font-medium text-white">{humanize(suggestion.source)}</div>
-                                        <div className="text-xs text-gray-500">{formatDate(suggestion.created_at)}</div>
+                                        <div className="text-2xl font-semibold text-white">{currentStrategy}</div>
+                                        <div className="mt-1 text-sm text-gray-500">{activeTheses.length} active target conditions</div>
                                     </div>
-                                    <StatusPill status={suggestion.status} />
+                                    <StatusPill status={runtime?.available ? "runtime_ready" : runtime?.status || "runtime_disabled"} />
                                 </div>
-                                <p className="text-sm text-gray-300">{suggestion.ai_notes || "No notes recorded."}</p>
-                                <div className="grid grid-cols-2 gap-3 text-sm">
-                                    <Info label="Win rate" value={`${(num(suggestion.deterministic_evidence.win_rate) * 100).toFixed(1)}%`} />
-                                    <Info label="Avg return" value={`${num(suggestion.deterministic_evidence.avg_return_pct).toFixed(2)}%`} />
+                                <div className="grid gap-3 sm:grid-cols-3">
+                                    <Info label="Executed triggers" value={executedTriggers} />
+                                    <Info label="Blocked triggers" value={blockedTriggers} />
+                                    <Info label="Exposure" value={`${summary.exposure_pct.toFixed(1)}%`} />
                                 </div>
-                                {suggestion.status === "pending" ? (
-                                    <div className="grid gap-2 sm:grid-cols-2">
-                                        <button
-                                            onClick={() => handleSuggestion(suggestion.id, "approve")}
-                                            disabled={loading}
-                                            className="rounded border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm font-medium text-emerald-100 hover:bg-emerald-500/20 disabled:opacity-50"
-                                        >
-                                            Approve
-                                        </button>
-                                        <button
-                                            onClick={() => handleSuggestion(suggestion.id, "reject")}
-                                            disabled={loading}
-                                            className="rounded border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-gray-100 hover:bg-white/10 disabled:opacity-50"
-                                        >
-                                            Reject
-                                        </button>
-                                    </div>
-                                ) : null}
                             </div>
-                        ))}
-                    </div>
-                </Panel>
-            </section>
+                        </Panel>
 
-            <section className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
-                <Panel title="AI Notes Models">
-                    <div className="space-y-4 p-5">
-                        <div className="rounded border border-white/10 bg-black/30 p-3 text-sm">
-                            <div className="flex flex-wrap items-center justify-between gap-3">
-                                <div>
-                                    <div className="font-medium text-white">Ollama model routing</div>
-                                    <div className="text-xs text-gray-500">
-                                        {models?.message || runtime?.message || "Loading local models..."}
-                                    </div>
-                                </div>
-                                <StatusPill status={models?.status || runtime?.status || "checking"} />
-                            </div>
-                        </div>
-                        <div className="grid gap-3">
-                            {modelRoles.map(({ role, label, note }) => (
-                                <div key={role} className="grid gap-2 rounded border border-white/10 bg-black/20 p-3 md:grid-cols-[0.75fr_1fr_auto] md:items-center">
-                                    <div>
-                                        <div className="text-sm font-medium text-white">{label}</div>
-                                        <div className="text-xs text-gray-500">{note}</div>
-                                    </div>
-                                    <select
-                                        value={modelRouting[role] || ""}
-                                        onChange={(event) => {
-                                            setModelRoutingDirty(true);
-                                            setModelRouting((current) => ({ ...current, [role]: event.target.value }));
-                                        }}
-                                        className="w-full rounded border border-white/10 bg-black/50 px-3 py-2 text-sm text-white outline-none focus:border-cyan-400"
-                                        aria-label={`${label} model`}
-                                    >
-                                        <option value="">
-                                            Use default ({models?.routing?.effective?.[role] || runtime?.model || "configured model"})
-                                        </option>
-                                        {(models?.models || []).map((model) => (
-                                            <option key={`${role}:${model.name}`} value={model.name}>
-                                                {model.name}
-                                            </option>
-                                        ))}
-                                    </select>
-                                    <button
-                                        onClick={() => testSingleModel(role)}
-                                        disabled={loading || !(modelRouting[role] || models?.routing?.effective?.[role])}
-                                        className="inline-flex items-center justify-center rounded border border-white/10 bg-white/5 px-3 py-2 text-xs text-gray-200 hover:bg-white/10 disabled:opacity-50"
-                                    >
-                                        Test
-                                    </button>
-                                </div>
-                            ))}
-                        </div>
-                        {modelTestStatus ? <div className="rounded border border-cyan-500/20 bg-cyan-500/10 p-3 text-sm text-cyan-100">{modelTestStatus}</div> : null}
-                        <div className="grid gap-2 sm:grid-cols-2">
-                            <button
-                                onClick={useFastPaperDefaults}
-                                disabled={loading || !models?.models?.length}
-                                className="inline-flex w-full items-center justify-center gap-2 rounded border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-gray-100 hover:bg-white/10 disabled:opacity-50"
-                            >
-                                <Bot className="h-4 w-4" />
-                                Use fast paper-trading defaults
-                            </button>
-                            <button
-                                onClick={runThesisDryRun}
-                                disabled={loading}
-                                className="inline-flex w-full items-center justify-center gap-2 rounded border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-gray-100 hover:bg-white/10 disabled:opacity-50"
-                            >
-                                <Target className="h-4 w-4" />
-                                Run thesis dry-run
-                            </button>
-                            <button
-                                onClick={runPaperTradeNow}
-                                disabled={loading}
-                                className="inline-flex w-full items-center justify-center gap-2 rounded border border-green-500/40 bg-green-500/10 px-3 py-2 text-sm font-medium text-green-100 hover:bg-green-500/20 disabled:opacity-50 sm:col-span-2"
-                            >
-                                <Play className="h-4 w-4" />
-                                Run paper trade now
-                            </button>
-                        </div>
-                        <button
-                            onClick={saveTestAndRunModels}
-                            disabled={loading || !models?.models?.length}
-                            className="inline-flex w-full items-center justify-center gap-2 rounded border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-sm font-medium text-cyan-100 hover:bg-cyan-500/20 disabled:opacity-50"
-                        >
-                            <Bot className="h-4 w-4" />
-                            Save, test thesis/trade models, run research
-                        </button>
-                    </div>
-                </Panel>
-
-                <Accordion
-                    title="Downloaded Models"
-                    summary={models?.models?.length ? `${models.models.length} models` : "0 models"}
-                    defaultOpen={false}
-                >
-                    <div className="space-y-3 p-5">
-                        <div className="text-xs text-gray-500">
-                            Ollama models available to the crew. Tap the View Debug button for the raw payload.
-                        </div>
-                        <div className="max-h-[420px] divide-y divide-white/5 overflow-y-auto rounded border border-white/10 bg-black/20 scrollbar-thin-cyan">
-                            {!models?.models?.length ? (
-                                <Empty text="No downloaded Ollama models were returned. Check that Ollama is reachable from the backend." />
-                            ) : models.models.map((model) => (
-                                <div key={model.name} className="px-4 py-3">
-                                    <div className="font-mono text-sm text-white">{model.name}</div>
-                                    <div className="mt-1 flex flex-wrap gap-3 text-xs text-gray-500">
-                                        <span>{formatBytes(model.size)}</span>
-                                        {model.parameter_size ? <span>{model.parameter_size}</span> : null}
-                                        {model.quantization_level ? <span>{model.quantization_level}</span> : null}
-                                        {model.family ? <span>{model.family}</span> : null}
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                        <DebugJson value={models ?? {}} label="View Debug" maxHeight="20rem" />
-                    </div>
-                </Accordion>
-            </section>
-
-            <section className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
-                <Panel title="Why No Trade Yet?">
-                    <div className="space-y-3 p-5">
-                        <div className="flex flex-wrap items-center gap-2">
-                            <StatusPill status={botState.toLowerCase().replace(" ", "_")} />
-                            <StatusPill status={summary.settings.trade_cadence_mode || "aggressive_paper"} />
-                            <span className="text-xs text-gray-500">{activeTheses.length} active theses</span>
-                        </div>
-                        {diagnostics?.active_research_tasks?.length ? (
-                            <div className="rounded border border-cyan-500/20 bg-cyan-500/10 p-3 text-sm text-cyan-100">
-                                Research run #{diagnostics.active_research_tasks[0].id} is {diagnostics.active_research_tasks[0].status}.
-                                {typeof diagnostics.active_research_tasks[0].summary?.current_symbol === "string"
-                                    ? ` Current symbol: ${diagnostics.active_research_tasks[0].summary.current_symbol}.`
-                                    : " Waiting for the worker to pick it up."}
-                            </div>
-                        ) : null}
-                        {diagnostics?.latest_formula_candidate ? (
-                            <div className="rounded border border-white/10 bg-black/30 p-3 text-sm text-gray-200">
-                                Latest formula candidate: {diagnostics.latest_formula_candidate.exchange.toUpperCase()}:{diagnostics.latest_formula_candidate.symbol}
-                                {" "}{diagnostics.latest_formula_candidate.side.toUpperCase()} score {diagnostics.latest_formula_candidate.entry_score.toFixed(2)}
-                                {" "}at {formatPrice(diagnostics.latest_formula_candidate.price)}.
-                            </div>
-                        ) : null}
-                        {currentBlockers.length === 0 ? (
-                            <div className="rounded border border-green-500/20 bg-green-500/10 p-3 text-sm text-green-100">
-                                No current blocker found. Formula-first research will create and execute paper entries when data, backtest, and position guardrails pass.
-                            </div>
-                        ) : (
-                            <div className="space-y-2">
-                                {currentBlockers.map((blocker) => (
-                                    <div key={blocker} className="rounded border border-yellow-500/20 bg-yellow-500/10 p-3 text-sm text-yellow-100">
-                                        {blocker}
+                        <Panel title="Active Target Conditions">
+                            <div className="grid gap-3 p-4">
+                                {activeTheses.length === 0 ? (
+                                    <Empty text="No active theses. Enable research after configuring Ollama to let the team create standing targets." />
+                                ) : activeTheses.map((thesis) => (
+                                    <div key={thesis.id} className="rounded border border-white/10 bg-black/30 p-4">
+                                        <div className="mb-3 flex items-start justify-between gap-3">
+                                            <div>
+                                                <div className="text-lg font-semibold text-white">{thesis.symbol}</div>
+                                                <div className="text-xs text-gray-500">
+                                                    {thesis.exchange.toUpperCase()} / {thesis.strategy_name}
+                                                    {thesis.llm_model ? ` / ${thesis.llm_model}` : ""}
+                                                </div>
+                                            </div>
+                                            <StatusPill status={thesis.status} />
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
+                                            <Info label="Latest" value={formatPrice(thesis.latest_observed_price)} />
+                                            <Info label="Entry" value={formatPrice(thesis.entry_target)} />
+                                            <Info label="Take profit" value={formatPrice(thesis.take_profit_target)} />
+                                            <Info label="Stop loss" value={formatPrice(thesis.stop_loss_target)} />
+                                        </div>
+                                        <div className="mt-3 h-2 overflow-hidden rounded bg-white/10">
+                                            <div className="h-full bg-cyan-400" style={{ width: `${Math.round(thesis.confidence * 100)}%` }} />
+                                        </div>
+                                        <p className="mt-3 line-clamp-2 text-sm text-gray-300">{thesis.thesis}</p>
+                                        <div className="mt-3 text-xs text-gray-500">Expires {formatDate(thesis.expires_at)}</div>
                                     </div>
                                 ))}
                             </div>
-                        )}
-                        {diagnostics?.recommended_action ? (
-                            <div className="rounded border border-cyan-500/20 bg-cyan-500/10 p-3 text-sm text-cyan-100">
-                                {diagnostics.recommended_action}
-                            </div>
-                        ) : null}
-                        {diagnostics?.open_position_count ? (
-                            <div className="rounded border border-white/10 bg-black/20 p-3 text-xs text-gray-300">
-                                Open paper positions: {diagnostics.open_position_count}
-                                {diagnostics.unmanaged_position_count ? ` / ${diagnostics.unmanaged_position_count} need exit repair` : " / exit plans managed"}
-                            </div>
-                        ) : null}
-                        {diagnostics?.latest_repaired_position ? (
-                            <div className="rounded border border-emerald-500/20 bg-emerald-500/10 p-3 text-xs text-emerald-100">
-                                Latest exit repair: {diagnostics.latest_repaired_position.symbol || "position"} / {String(asRecord(diagnostics.latest_repaired_position.evidence).exit_source || "formula")}
-                            </div>
-                        ) : null}
-                        {diagnostics?.latest_model_failure ? (
-                            <div className="rounded border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-100">
-                                Latest model issue: {diagnostics.latest_model_failure.role} / {diagnostics.latest_model_failure.model} / {diagnostics.latest_model_failure.status}
-                            </div>
-                        ) : null}
-                        {diagnostics?.latest_execution_blocker?.blocker_reason ? (
-                            <div className="rounded border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-100">
-                                Latest execution blocker: {diagnostics.latest_execution_blocker.blocker_reason}
-                            </div>
-                        ) : null}
-                    </div>
-                </Panel>
-
-                <Accordion
-                    title="Decision Log"
-                    summary={activity.length ? `${activity.length} events` : "0 events"}
-                    defaultOpen={true}
-                    controls={
-                        <button
-                            onClick={() => setDebugOpen((value) => !value)}
-                            className="inline-flex items-center gap-2 rounded border border-primary/30 bg-primary/5 px-2.5 py-1 font-mono text-[11px] uppercase tracking-wider text-primary hover:bg-primary/10"
-                        >
-                            <Terminal className="h-3.5 w-3.5" />
-                            {debugOpen ? "Hide Debug" : "View Debug"}
-                        </button>
-                    }
-                >
-                    <div className="p-5">
-                        <div className="mb-3 text-xs text-gray-500">
-                            Structured rationale, evidence, and blockers from the local AI team.
-                        </div>
-                        <div className="max-h-[520px] space-y-3 overflow-y-auto pr-1 scrollbar-thin-cyan">
-                            {activity.length === 0 ? (
-                                <Empty text="No AI activity recorded yet. Start the bot or wait for the next scheduled research cycle." />
-                            ) : activity.map((event) => (
-                                <TraceRow key={event.id} event={event} debugOpen={debugOpen} />
-                            ))}
-                        </div>
-                    </div>
-                </Accordion>
-            </section>
-
-            <section className="grid gap-4 xl:grid-cols-[1fr_1fr]">
-                <Panel title="Current Strategy">
-                    <div className="space-y-4 p-5">
-                        <div className="flex flex-wrap items-center justify-between gap-3">
-                            <div>
-                                <div className="text-2xl font-semibold text-white">{currentStrategy}</div>
-                                <div className="mt-1 text-sm text-gray-500">{activeTheses.length} active target conditions</div>
-                            </div>
-                            <StatusPill status={runtime?.available ? "runtime_ready" : runtime?.status || "runtime_disabled"} />
-                        </div>
-                        <div className="grid gap-3 sm:grid-cols-3">
-                            <Info label="Executed triggers" value={executedTriggers} />
-                            <Info label="Blocked triggers" value={blockedTriggers} />
-                            <Info label="Exposure" value={`${summary.exposure_pct.toFixed(1)}%`} />
-                        </div>
-                    </div>
-                </Panel>
-
-                <Panel title="Strategy Performance">
-                    <div className="divide-y divide-white/5">
-                        {strategies.length === 0 ? (
-                            <Empty text="No completed strategy history yet." />
-                        ) : strategies.slice(0, 6).map((strategy) => (
-                            <div key={strategy.strategy_name} className="grid gap-3 px-5 py-4 md:grid-cols-[1fr_0.7fr_0.7fr_0.7fr] md:items-center">
-                                <div>
-                                    <div className="font-medium text-white">{strategy.strategy_name}</div>
-                                    <div className="text-xs text-gray-500">{strategy.recommendations} recommendations / {strategy.executed} executed</div>
-                                </div>
-                                <Info label="Success" value={`${strategy.success_rate_pct.toFixed(1)}%`} />
-                                <Info label="Avg return" value={`${strategy.avg_return_pct.toFixed(2)}%`} />
-                                <Info label="W/L" value={`${strategy.wins}/${strategy.losses}`} />
-                            </div>
-                        ))}
-                    </div>
-                </Panel>
-            </section>
-
-            <Panel title="Model Performance">
-                <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-white/10 text-sm">
-                        <thead className="bg-white/[0.03] text-xs uppercase text-gray-500">
-                            <tr>
-                                <th className="px-4 py-3 text-left font-medium">Model</th>
-                                <th className="px-4 py-3 text-left font-medium">Role</th>
-                                <th className="px-4 py-3 text-right font-medium">Calls</th>
-                                <th className="px-4 py-3 text-right font-medium">Success</th>
-                                <th className="px-4 py-3 text-right font-medium">Timeouts</th>
-                                <th className="px-4 py-3 text-right font-medium">Latency</th>
-                                <th className="px-4 py-3 text-right font-medium">Theses</th>
-                                <th className="px-4 py-3 text-right font-medium">Trade A/R</th>
-                                <th className="px-4 py-3 text-right font-medium">Last used</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-white/5">
-                            {modelPerformance.length === 0 ? (
-                                <tr>
-                                    <td colSpan={9}>
-                                        <Empty text="No model calls have been recorded yet." />
-                                    </td>
-                                </tr>
-                            ) : modelPerformance.map((row) => (
-                                <tr key={`${row.role}:${row.model}`} className="text-gray-300">
-                                    <td className="max-w-[360px] truncate px-4 py-3 font-mono text-xs text-white">{row.model}</td>
-                                    <td className="px-4 py-3">
-                                        <div>{row.role}</div>
-                                        {row.latest_status ? <div className="text-xs text-gray-500">Latest: {row.latest_status}</div> : null}
-                                        {row.latest_error || row.latest_validation_error ? (
-                                            <div className="max-w-[280px] truncate text-xs text-red-200">
-                                                {row.latest_error || row.latest_validation_error}
-                                            </div>
-                                        ) : null}
-                                    </td>
-                                    <td className="px-4 py-3 text-right font-mono">{row.calls}</td>
-                                    <td className="px-4 py-3 text-right font-mono">{row.success_rate_pct.toFixed(1)}%</td>
-                                    <td className="px-4 py-3 text-right font-mono">
-                                        {row.timeouts}
-                                        {row.timeout_rate_pct ? <div className="text-xs text-gray-500">{row.timeout_rate_pct.toFixed(1)}%</div> : null}
-                                    </td>
-                                    <td className="px-4 py-3 text-right font-mono">{row.avg_latency_ms ? `${row.avg_latency_ms}ms` : "--"}</td>
-                                    <td className="px-4 py-3 text-right font-mono">{row.theses_created}</td>
-                                    <td className="px-4 py-3 text-right font-mono">{row.trades_approved}/{row.trades_rejected}</td>
-                                    <td className="px-4 py-3 text-right text-xs text-gray-500">{formatDate(row.last_used_at)}</td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
+                        </Panel>
+                    </section>
                 </div>
-            </Panel>
+            )}
 
-            <Panel title="Active Target Conditions">
-                <div className="grid gap-3 p-4 lg:grid-cols-2">
-                    {activeTheses.length === 0 ? (
-                        <Empty text="No active theses. Enable research after configuring Ollama to let the team create standing targets." />
-                    ) : activeTheses.map((thesis) => (
-                        <div key={thesis.id} className="rounded border border-white/10 bg-black/30 p-4">
-                            <div className="mb-3 flex items-start justify-between gap-3">
-                                <div>
-                                    <div className="text-lg font-semibold text-white">{thesis.symbol}</div>
-                                    <div className="text-xs text-gray-500">
-                                        {thesis.exchange.toUpperCase()} / {thesis.strategy_name}
-                                        {thesis.llm_model ? ` / ${thesis.llm_model}` : ""}
-                                    </div>
-                                </div>
-                                <StatusPill status={thesis.status} />
-                            </div>
-                            <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
-                                <Info label="Latest" value={formatPrice(thesis.latest_observed_price)} />
-                                <Info label="Entry" value={formatPrice(thesis.entry_target)} />
-                                <Info label="Take profit" value={formatPrice(thesis.take_profit_target)} />
-                                <Info label="Stop loss" value={formatPrice(thesis.stop_loss_target)} />
-                            </div>
-                            <div className="mt-3 h-2 overflow-hidden rounded bg-white/10">
-                                <div className="h-full bg-cyan-400" style={{ width: `${Math.round(thesis.confidence * 100)}%` }} />
-                            </div>
-                            <p className="mt-3 line-clamp-2 text-sm text-gray-300">{thesis.thesis}</p>
-                            <div className="mt-3 text-xs text-gray-500">Expires {formatDate(thesis.expires_at)}</div>
-                        </div>
-                    ))}
-                </div>
-            </Panel>
+            {activeTab === "portfolio" && (
+                <div className="space-y-6">
+                    <section className="grid gap-4 xl:grid-cols-[1fr_1.5fr]">
+                        <Panel title="Asset Allocation">
+                            <PortfolioDonutChart cash={summary.cash_balance} invested={summary.invested_value} />
+                        </Panel>
 
-            <section className="grid gap-4 xl:grid-cols-[1fr_1fr]">
-                <Panel title="Owned Assets">
-                    <div className="divide-y divide-white/5">
-                        {positions.length === 0 ? (
-                            <Empty text="The AI team does not currently own any paper assets." />
-                        ) : positions.map((position) => (
-                            <div key={`${position.exchange}:${position.symbol}`} className="grid gap-3 px-5 py-4 md:grid-cols-[1fr_0.75fr_0.75fr_0.7fr_1fr] md:items-center">
-                                <div>
-                                    <div className="font-medium text-white">{position.symbol}</div>
-                                    <div className="text-xs text-gray-500">
-                                        {(position.side || "long").toUpperCase()} / {position.quantity.toFixed(6)} units
+                        <Panel title="Autonomy Settings">
+                            <div className="space-y-4 p-5">
+                                <div className="rounded border border-white/10 bg-black/30 p-3">
+                                    <div className="flex flex-wrap items-center justify-between gap-3">
+                                        <div>
+                                            <div className="text-sm font-medium text-white">Bot state</div>
+                                            <div className="text-xs text-gray-500">Primary source and paper venue: {primaryExchange.toUpperCase()}</div>
+                                        </div>
+                                        <StatusPill status={botState.toLowerCase().replace(" ", "_")} />
                                     </div>
+                                    <button
+                                        onClick={backfillPrimaryExchange}
+                                        disabled={loading}
+                                        className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded border border-white/10 bg-white/5 px-3 py-2 text-sm text-gray-200 hover:bg-white/10 disabled:opacity-50"
+                                    >
+                                        <RefreshCcw className="h-4 w-4" />
+                                        Backfill {primaryExchange.toUpperCase()} assets
+                                    </button>
                                 </div>
-                                <Info
-                                    label={position.side === "short" ? "Collateral" : "Market value"}
-                                    value={formatCurrency(position.side === "short" ? position.reserved_collateral : position.market_value)}
-                                />
-                                <Info label="Unrealized" value={formatCurrency(position.unrealized_pnl)} />
-                                <Info label="Return" value={`${position.return_pct.toFixed(2)}%`} />
-                                <div className="text-sm">
-                                    <div className="text-xs uppercase tracking-wide text-gray-500">Exit plan</div>
-                                    <div className="font-medium text-gray-100">
-                                        {humanize(position.exit_health || "missing")} / {humanize(position.exit_source || "unknown")}
+                                <div className="flex items-center justify-between gap-4">
+                                    <div>
+                                        <div className="text-sm font-medium text-white">Paper trading</div>
+                                        <div className="text-xs text-gray-500">Execution after trigger and guardrail approval</div>
                                     </div>
-                                    <div className="mt-1 text-xs text-gray-500">
-                                        TP {formatPrice(position.take_profit)} ({formatTargetDistance(position.distance_to_take_profit_pct)}) / SL {formatPrice(position.stop_loss)} ({formatTargetDistance(position.distance_to_stop_loss_pct)})
+                                    <Toggle
+                                        enabled={summary.settings.autonomous_enabled}
+                                        onClick={() => patchAutonomy({ autonomous_enabled: !summary.settings.autonomous_enabled })}
+                                    />
+                                </div>
+                                <div className="flex items-center justify-between gap-4">
+                                    <div>
+                                        <div className="text-sm font-medium text-white">Research loop</div>
+                                        <div className="text-xs text-gray-500">Every {Math.round(summary.settings.research_interval_seconds / 60)} minutes</div>
                                     </div>
+                                    <Toggle
+                                        enabled={summary.settings.research_enabled}
+                                        onClick={() => patchAutonomy({ research_enabled: !summary.settings.research_enabled })}
+                                    />
                                 </div>
-                            </div>
-                        ))}
-                    </div>
-                </Panel>
-
-                <Panel title="Bought And Sold">
-                    <div className="max-h-[520px] divide-y divide-white/5 overflow-y-auto">
-                        {orders.length === 0 ? (
-                            <Empty text="No AI paper trades have executed yet." />
-                        ) : orders.map((order) => (
-                            <div key={order.id} className="grid gap-3 px-5 py-4 md:grid-cols-[0.5fr_1fr_0.8fr_0.8fr] md:items-center">
-                                <StatusPill status={order.side} />
-                                <div>
-                                    <div className="font-medium text-white">{order.symbol}</div>
-                                    <div className="text-xs text-gray-500">{order.strategy || "strategy"} / {order.reason || "paper"}</div>
-                                </div>
-                                <Info label="Price" value={formatPrice(order.price)} />
-                                <Info label="When" value={formatDate(order.timestamp)} />
-                            </div>
-                        ))}
-                    </div>
-                </Panel>
-            </section>
-
-            <section className="grid gap-4 xl:grid-cols-[1fr_1fr]">
-                <Panel title="Learning Memory">
-                    <div className="max-h-[460px] divide-y divide-white/5 overflow-y-auto">
-                        {lessons.length === 0 ? (
-                            <Empty text="Lessons will appear after wins, losses, blocked triggers, and resets." />
-                        ) : lessons.map((lesson) => (
-                            <div key={lesson.id} className="px-5 py-4">
-                                <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-                                    <div className="text-sm font-medium text-white">
-                                        {[lesson.symbol, lesson.strategy_name, lesson.outcome.replaceAll("_", " ")].filter(Boolean).join(" / ")}
+                                <div className="flex items-center justify-between gap-4">
+                                    <div>
+                                        <div className="text-sm font-medium text-white">Trigger monitor</div>
+                                        <div className="text-xs text-gray-500">Entry, take-profit, and stop-loss targets</div>
                                     </div>
-                                    <div className="text-xs text-gray-500">{formatDate(lesson.created_at)}</div>
-                                </div>
-                                <p className="text-sm text-gray-300">{lesson.lesson}</p>
-                                {lesson.return_pct !== null && (
-                                    <div className="mt-2 text-xs text-gray-500">Return {lesson.return_pct.toFixed(2)}%</div>
-                                )}
-                            </div>
-                        ))}
-                    </div>
-                </Panel>
-
-                <Panel title="Reset History">
-                    <div className="max-h-[460px] divide-y divide-white/5 overflow-y-auto">
-                        {resets.length === 0 ? (
-                            <Empty text="No bankroll resets recorded." />
-                        ) : resets.map((reset) => (
-                            <div key={reset.id} className="px-5 py-4">
-                                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                                    <div className="font-medium text-white">Reset #{reset.reset_number}</div>
-                                    <div className="text-xs text-gray-500">{formatDate(reset.created_at)}</div>
+                                    <Toggle
+                                        enabled={summary.settings.trigger_monitor_enabled}
+                                        onClick={() => patchAutonomy({ trigger_monitor_enabled: !summary.settings.trigger_monitor_enabled })}
+                                    />
                                 </div>
                                 <div className="grid grid-cols-2 gap-3 text-sm">
-                                    <Info label="Equity before" value={formatCurrency(reset.equity_before_reset)} />
-                                    <Info label="Drawdown" value={`${reset.drawdown_pct.toFixed(2)}%`} />
-                                    <Info label="Starting bankroll" value={formatCurrency(reset.starting_bankroll)} />
-                                    <Info label="P/L" value={formatCurrency(reset.realized_pnl)} />
+                                    <Info label="Max position" value={`${(summary.settings.max_position_pct * 100).toFixed(0)}%`} />
+                                    <Info label="Open positions" value={`${summary.open_positions}/${summary.settings.max_open_positions}`} />
+                                    <Info label="Daily loss cap" value={`${(summary.settings.max_daily_loss_pct * 100).toFixed(0)}%`} />
+                                    <Info label="Trades/day" value={summary.settings.max_trades_per_day} />
+                                    <Info label="Reset threshold" value={`${(summary.settings.bankroll_reset_drawdown_pct * 100).toFixed(0)}%`} />
+                                    <Info label="Starting bankroll" value={formatCurrency(summary.settings.default_starting_bankroll)} />
                                 </div>
-                                <p className="mt-3 text-sm text-gray-300">{reset.lessons || reset.reason}</p>
+                                <select
+                                    value={summary.settings.ai_paper_account_id || summary.account_id || ""}
+                                    onChange={(event) => patchAutonomy({ ai_paper_account_id: Number(event.target.value) })}
+                                    className="w-full rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-cyan-400"
+                                    aria-label="AI paper account"
+                                >
+                                    {accounts.map((account) => (
+                                        <option key={account.id} value={account.id}>{account.name}</option>
+                                    ))}
+                                </select>
+                                <button
+                                    onClick={manualReset}
+                                    disabled={loading}
+                                    className="inline-flex w-full items-center justify-center gap-2 rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm font-medium text-red-100 hover:bg-red-500/20 disabled:opacity-50"
+                                >
+                                    <RefreshCcw className="h-4 w-4" />
+                                    Reset bankroll
+                                </button>
                             </div>
-                        ))}
-                    </div>
-                </Panel>
-            </section>
+                        </Panel>
+                    </section>
+
+                    <section className="grid gap-4 xl:grid-cols-[1fr_1fr]">
+                        <Panel title="Owned Assets">
+                            <div className="divide-y divide-white/5">
+                                {positions.length === 0 ? (
+                                    <Empty text="The AI team does not currently own any paper assets." />
+                                ) : positions.map((position) => (
+                                    <div key={`${position.exchange}:${position.symbol}`} className="grid gap-3 px-5 py-4 md:grid-cols-[1fr_0.75fr_0.75fr_0.7fr_1fr] md:items-center">
+                                        <div>
+                                            <div className="font-medium text-white">{position.symbol}</div>
+                                            <div className="text-xs text-gray-500">
+                                                {(position.side || "long").toUpperCase()} / {position.quantity.toFixed(6)} units
+                                            </div>
+                                        </div>
+                                        <Info
+                                            label={position.side === "short" ? "Collateral" : "Market value"}
+                                            value={formatCurrency(position.side === "short" ? position.reserved_collateral : position.market_value)}
+                                        />
+                                        <Info label="Unrealized" value={formatCurrency(position.unrealized_pnl)} />
+                                        <Info label="Return" value={`${position.return_pct.toFixed(2)}%`} />
+                                        <div className="text-sm">
+                                            <div className="text-xs uppercase tracking-wide text-gray-500">Exit plan</div>
+                                            <div className="font-medium text-gray-100">
+                                                {humanize(position.exit_health || "missing")} / {humanize(position.exit_source || "unknown")}
+                                            </div>
+                                            <div className="mt-1 text-xs text-gray-500">
+                                                TP {formatPrice(position.take_profit)} ({formatTargetDistance(position.distance_to_take_profit_pct)}) / SL {formatPrice(position.stop_loss)} ({formatTargetDistance(position.distance_to_stop_loss_pct)})
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </Panel>
+
+                        <Panel title="Bought And Sold">
+                            <div className="max-h-[520px] divide-y divide-white/5 overflow-y-auto">
+                                {orders.length === 0 ? (
+                                    <Empty text="No AI paper trades have executed yet." />
+                                ) : orders.map((order) => (
+                                    <div key={order.id} className="grid gap-3 px-5 py-4 md:grid-cols-[0.5fr_1fr_0.8fr_0.8fr] md:items-center">
+                                        <StatusPill status={order.side} />
+                                        <div>
+                                            <div className="font-medium text-white">{order.symbol}</div>
+                                            <div className="text-xs text-gray-500">{order.strategy || "strategy"} / {order.reason || "paper"}</div>
+                                        </div>
+                                        <Info label="Price" value={formatPrice(order.price)} />
+                                        <Info label="When" value={formatDate(order.timestamp)} />
+                                    </div>
+                                ))}
+                            </div>
+                        </Panel>
+                    </section>
+                </div>
+            )}
+
+            {activeTab === "config" && (
+                <div className="space-y-6">
+                    <section className="grid gap-4 xl:grid-cols-[1fr_1fr]">
+                        <Panel title="Formula Settings">
+                            <div className="space-y-4 p-5">
+                                <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-white/10 bg-black/30 p-3">
+                                    <div>
+                                        <div className="text-sm font-medium text-white">{formulaConfig?.name || "Formula v1"}</div>
+                                        <div className="text-xs text-gray-500">Active deterministic config</div>
+                                    </div>
+                                    <select
+                                        value={formulaConfig?.authority_mode || "approval_required"}
+                                        onChange={(event) => patchFormulaConfig({ authority_mode: event.target.value as FormulaConfig["authority_mode"] })}
+                                        className="rounded border border-white/10 bg-black/50 px-3 py-2 text-sm text-white outline-none focus:border-cyan-400"
+                                        aria-label="Formula authority mode"
+                                    >
+                                        <option value="approval_required">Require approval</option>
+                                        <option value="auto_apply_bounded">Auto-apply bounded</option>
+                                    </select>
+                                </div>
+                                <div className="grid gap-3 md:grid-cols-2">
+                                    <FormulaInput label="Entry floor" value={num(formulaParameters.entry_score_floor, 0.5)} step="0.01" onCommit={(value) => patchFormulaParameter("entry_score_floor", value)} />
+                                    <FormulaInput label="Full size score" value={num(formulaParameters.full_size_score, 0.6)} step="0.01" onCommit={(value) => patchFormulaParameter("full_size_score", value)} />
+                                    <FormulaInput label="ATR length" value={num(formulaParameters.atr_length, 14)} step="1" onCommit={(value) => patchFormulaParameter("atr_length", value)} />
+                                    <FormulaInput label="RSI length" value={num(formulaParameters.rsi_length, 14)} step="1" onCommit={(value) => patchFormulaParameter("rsi_length", value)} />
+                                    <FormulaInput label="Long target ATR" value={num(longFormulaParameters.target_atr_multiplier, 2)} step="0.05" onCommit={(value) => patchFormulaParameter("long.target_atr_multiplier", value)} />
+                                    <FormulaInput label="Short target ATR" value={num(shortFormulaParameters.target_atr_multiplier, 1.4)} step="0.05" onCommit={(value) => patchFormulaParameter("short.target_atr_multiplier", value)} />
+                                    <FormulaInput label="Long min profit" value={num(longFormulaParameters.min_profit_pct, 0.012)} step="0.001" onCommit={(value) => patchFormulaParameter("long.min_profit_pct", value)} />
+                                    <FormulaInput label="Short min profit" value={num(shortFormulaParameters.min_profit_pct, 0.006)} step="0.001" onCommit={(value) => patchFormulaParameter("short.min_profit_pct", value)} />
+                                </div>
+                                <div className="rounded border border-white/10 bg-black/20 p-3 text-xs text-gray-400">
+                                    <span className="text-gray-500">Decision path</span>
+                                    <span className="ml-2 text-gray-200">Formula, backtests, guardrails</span>
+                                </div>
+                            </div>
+                        </Panel>
+
+                        <Panel title="Formula Suggestions">
+                            <div className="max-h-[430px] divide-y divide-white/5 overflow-y-auto">
+                                {formulaSuggestions.length === 0 ? (
+                                    <Empty text="No formula tuning suggestions." />
+                                ) : formulaSuggestions.map((suggestion) => (
+                                    <div key={suggestion.id} className="space-y-3 px-5 py-4">
+                                        <div className="flex flex-wrap items-center justify-between gap-2">
+                                            <div>
+                                                <div className="font-medium text-white">{humanize(suggestion.source)}</div>
+                                                <div className="text-xs text-gray-500">{formatDate(suggestion.created_at)}</div>
+                                            </div>
+                                            <StatusPill status={suggestion.status} />
+                                        </div>
+                                        <p className="text-sm text-gray-300">{suggestion.ai_notes || "No notes recorded."}</p>
+                                        <div className="grid grid-cols-2 gap-3 text-sm">
+                                            <Info label="Win rate" value={`${(num(suggestion.deterministic_evidence.win_rate) * 100).toFixed(1)}%`} />
+                                            <Info label="Avg return" value={`${num(suggestion.deterministic_evidence.avg_return_pct).toFixed(2)}%`} />
+                                        </div>
+                                        {suggestion.status === "pending" ? (
+                                            <div className="grid gap-2 sm:grid-cols-2">
+                                                <button
+                                                    onClick={() => handleSuggestion(suggestion.id, "approve")}
+                                                    disabled={loading}
+                                                    className="rounded border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm font-medium text-emerald-100 hover:bg-emerald-500/20 disabled:opacity-50"
+                                                >
+                                                    Approve
+                                                </button>
+                                                <button
+                                                    onClick={() => handleSuggestion(suggestion.id, "reject")}
+                                                    disabled={loading}
+                                                    className="rounded border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-gray-100 hover:bg-white/10 disabled:opacity-50"
+                                                >
+                                                    Reject
+                                                </button>
+                                            </div>
+                                        ) : null}
+                                    </div>
+                                ))}
+                            </div>
+                        </Panel>
+                    </section>
+
+                    <section className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
+                        <Panel title="AI Notes Models">
+                            <div className="space-y-4 p-5">
+                                <div className="rounded border border-white/10 bg-black/30 p-3 text-sm">
+                                    <div className="flex flex-wrap items-center justify-between gap-3">
+                                        <div>
+                                            <div className="font-medium text-white">Ollama model routing</div>
+                                            <div className="text-xs text-gray-500">
+                                                {models?.message || runtime?.message || "Loading local models..."}
+                                            </div>
+                                        </div>
+                                        <StatusPill status={models?.status || runtime?.status || "checking"} />
+                                    </div>
+                                </div>
+                                <div className="grid gap-3">
+                                    {modelRoles.map(({ role, label, note }) => (
+                                        <div key={role} className="grid gap-2 rounded border border-white/10 bg-black/20 p-3 md:grid-cols-[0.75fr_1fr_auto] md:items-center">
+                                            <div>
+                                                <div className="text-sm font-medium text-white">{label}</div>
+                                                <div className="text-xs text-gray-500">{note}</div>
+                                            </div>
+                                            <select
+                                                value={modelRouting[role] || ""}
+                                                onChange={(event) => {
+                                                    setModelRoutingDirty(true);
+                                                    setModelRouting((current) => ({ ...current, [role]: event.target.value }));
+                                                }}
+                                                className="w-full rounded border border-white/10 bg-black/50 px-3 py-2 text-sm text-white outline-none focus:border-cyan-400"
+                                                aria-label={`${label} model`}
+                                            >
+                                                <option value="">
+                                                    Use default ({models?.routing?.effective?.[role] || runtime?.model || "configured model"})
+                                                </option>
+                                                {(models?.models || []).map((model) => (
+                                                    <option key={`${role}:${model.name}`} value={model.name}>
+                                                        {model.name}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                            <button
+                                                onClick={() => testSingleModel(role)}
+                                                disabled={loading || !(modelRouting[role] || models?.routing?.effective?.[role])}
+                                                className="inline-flex items-center justify-center rounded border border-white/10 bg-white/5 px-3 py-2 text-xs text-gray-200 hover:bg-white/10 disabled:opacity-50"
+                                            >
+                                                Test
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                                {modelTestStatus ? <div className="rounded border border-cyan-500/20 bg-cyan-500/10 p-3 text-sm text-cyan-100">{modelTestStatus}</div> : null}
+                                <div className="grid gap-2 sm:grid-cols-2">
+                                    <button
+                                        onClick={useFastPaperDefaults}
+                                        disabled={loading || !models?.models?.length}
+                                        className="inline-flex w-full items-center justify-center gap-2 rounded border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-gray-100 hover:bg-white/10 disabled:opacity-50"
+                                    >
+                                        <Bot className="h-4 w-4" />
+                                        Use fast paper-trading defaults
+                                    </button>
+                                    <button
+                                        onClick={runThesisDryRun}
+                                        disabled={loading}
+                                        className="inline-flex w-full items-center justify-center gap-2 rounded border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-gray-100 hover:bg-white/10 disabled:opacity-50"
+                                    >
+                                        <Target className="h-4 w-4" />
+                                        Run thesis dry-run
+                                    </button>
+                                    <button
+                                        onClick={runPaperTradeNow}
+                                        disabled={loading}
+                                        className="inline-flex w-full items-center justify-center gap-2 rounded border border-green-500/40 bg-green-500/10 px-3 py-2 text-sm font-medium text-green-100 hover:bg-green-500/20 disabled:opacity-50 sm:col-span-2"
+                                    >
+                                        <Play className="h-4 w-4" />
+                                        Run paper trade now
+                                    </button>
+                                </div>
+                                <button
+                                    onClick={saveTestAndRunModels}
+                                    disabled={loading || !models?.models?.length}
+                                    className="inline-flex w-full items-center justify-center gap-2 rounded border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-sm font-medium text-cyan-100 hover:bg-cyan-500/20 disabled:opacity-50"
+                                >
+                                    <Bot className="h-4 w-4" />
+                                    Save, test thesis/trade models, run research
+                                </button>
+                            </div>
+                        </Panel>
+
+                        <div className="space-y-4">
+                            <Accordion
+                                title="Downloaded Models"
+                                summary={models?.models?.length ? `${models.models.length} models` : "0 models"}
+                                defaultOpen={false}
+                            >
+                                <div className="space-y-3 p-5">
+                                    <div className="text-xs text-gray-500">
+                                        Ollama models available to the crew. Tap the View Debug button for the raw payload.
+                                    </div>
+                                    <div className="max-h-[420px] divide-y divide-white/5 overflow-y-auto rounded border border-white/10 bg-black/20 scrollbar-thin-cyan">
+                                        {!models?.models?.length ? (
+                                            <Empty text="No downloaded Ollama models were returned. Check that Ollama is reachable from the backend." />
+                                        ) : models.models.map((model) => (
+                                            <div key={model.name} className="px-4 py-3">
+                                                <div className="font-mono text-sm text-white">{model.name}</div>
+                                                <div className="mt-1 flex flex-wrap gap-3 text-xs text-gray-500">
+                                                    <span>{formatBytes(model.size)}</span>
+                                                    {model.parameter_size ? <span>{model.parameter_size}</span> : null}
+                                                    {model.quantization_level ? <span>{model.quantization_level}</span> : null}
+                                                    {model.family ? <span>{model.family}</span> : null}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <DebugJson value={models ?? {}} label="View Debug" maxHeight="20rem" />
+                                </div>
+                            </Accordion>
+
+                            <Panel title="Model Performance">
+                                <div className="overflow-x-auto">
+                                    <table className="min-w-full divide-y divide-white/10 text-sm">
+                                        <thead className="bg-white/[0.03] text-xs uppercase text-gray-500">
+                                            <tr>
+                                                <th className="px-4 py-3 text-left font-medium">Model</th>
+                                                <th className="px-4 py-3 text-left font-medium">Role</th>
+                                                <th className="px-4 py-3 text-right font-medium">Calls</th>
+                                                <th className="px-4 py-3 text-right font-medium">Success</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-white/5">
+                                            {modelPerformance.length === 0 ? (
+                                                <tr>
+                                                    <td colSpan={4}>
+                                                        <Empty text="No model calls have been recorded yet." />
+                                                    </td>
+                                                </tr>
+                                            ) : modelPerformance.map((row) => (
+                                                <tr key={`${row.role}:${row.model}`} className="text-gray-300">
+                                                    <td className="max-w-[200px] truncate px-4 py-3 font-mono text-xs text-white">{row.model}</td>
+                                                    <td className="px-4 py-3">{row.role}</td>
+                                                    <td className="px-4 py-3 text-right font-mono">{row.calls}</td>
+                                                    <td className="px-4 py-3 text-right font-mono">{row.success_rate_pct.toFixed(1)}%</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </Panel>
+                        </div>
+                    </section>
+                </div>
+            )}
+
+            {activeTab === "logs" && (
+                <div className="space-y-6">
+                    <section className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
+                        <Panel title="Why No Trade Yet?">
+                            <div className="space-y-3 p-5">
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <StatusPill status={botState.toLowerCase().replace(" ", "_")} />
+                                    <StatusPill status={summary.settings.trade_cadence_mode || "aggressive_paper"} />
+                                    <span className="text-xs text-gray-500">{activeTheses.length} active theses</span>
+                                </div>
+                                {diagnostics?.active_research_tasks?.length ? (
+                                    <div className="rounded border border-cyan-500/20 bg-cyan-500/10 p-3 text-sm text-cyan-100">
+                                        Research run #{diagnostics.active_research_tasks[0].id} is {diagnostics.active_research_tasks[0].status}.
+                                        {typeof diagnostics.active_research_tasks[0].summary?.current_symbol === "string"
+                                            ? ` Current symbol: ${diagnostics.active_research_tasks[0].summary.current_symbol}.`
+                                            : " Waiting for the worker to pick it up."}
+                                    </div>
+                                ) : null}
+                                {diagnostics?.latest_formula_candidate ? (
+                                    <div className="rounded border border-white/10 bg-black/30 p-3 text-sm text-gray-200">
+                                        Latest formula candidate: {diagnostics.latest_formula_candidate.exchange.toUpperCase()}:{diagnostics.latest_formula_candidate.symbol}
+                                        {" "}{diagnostics.latest_formula_candidate.side.toUpperCase()} score {diagnostics.latest_formula_candidate.entry_score.toFixed(2)}
+                                        {" "}at {formatPrice(diagnostics.latest_formula_candidate.price)}.
+                                    </div>
+                                ) : null}
+                                {currentBlockers.length === 0 ? (
+                                    <div className="rounded border border-green-500/20 bg-green-500/10 p-3 text-sm text-green-100">
+                                        No current blocker found. Formula-first research will create and execute paper entries when data, backtest, and position guardrails pass.
+                                    </div>
+                                ) : (
+                                    <div className="space-y-2">
+                                        {currentBlockers.map((blocker) => (
+                                            <div key={blocker} className="rounded border border-yellow-500/20 bg-yellow-500/10 p-3 text-sm text-yellow-100">
+                                                {blocker}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                                {diagnostics?.recommended_action ? (
+                                    <div className="rounded border border-cyan-500/20 bg-cyan-500/10 p-3 text-sm text-cyan-100">
+                                        {diagnostics.recommended_action}
+                                    </div>
+                                ) : null}
+                                {diagnostics?.open_position_count ? (
+                                    <div className="rounded border border-white/10 bg-black/20 p-3 text-xs text-gray-300">
+                                        Open paper positions: {diagnostics.open_position_count}
+                                        {diagnostics.unmanaged_position_count ? ` / ${diagnostics.unmanaged_position_count} need exit repair` : " / exit plans managed"}
+                                    </div>
+                                ) : null}
+                                {diagnostics?.latest_repaired_position ? (
+                                    <div className="rounded border border-emerald-500/20 bg-emerald-500/10 p-3 text-xs text-emerald-100">
+                                        Latest exit repair: {diagnostics.latest_repaired_position.symbol || "position"} / {String(asRecord(diagnostics.latest_repaired_position.evidence).exit_source || "formula")}
+                                    </div>
+                                ) : null}
+                                {diagnostics?.latest_model_failure ? (
+                                    <div className="rounded border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-100">
+                                        Latest model issue: {diagnostics.latest_model_failure.role} / {diagnostics.latest_model_failure.model} / {diagnostics.latest_model_failure.status}
+                                    </div>
+                                ) : null}
+                                {diagnostics?.latest_execution_blocker?.blocker_reason ? (
+                                    <div className="rounded border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-100">
+                                        Latest execution blocker: {diagnostics.latest_execution_blocker.blocker_reason}
+                                    </div>
+                                ) : null}
+                            </div>
+                        </Panel>
+
+                        <Accordion
+                            title="Decision Log"
+                            summary={activity.length ? `${activity.length} events` : "0 events"}
+                            defaultOpen={true}
+                            controls={
+                                <button
+                                    onClick={() => setDebugOpen((value) => !value)}
+                                    className="inline-flex items-center gap-2 rounded border border-primary/30 bg-primary/5 px-2.5 py-1 font-mono text-[11px] uppercase tracking-wider text-primary hover:bg-primary/10"
+                                >
+                                    <Terminal className="h-3.5 w-3.5" />
+                                    {debugOpen ? "Hide Debug" : "View Debug"}
+                                </button>
+                            }
+                        >
+                            <div className="p-5">
+                                <div className="mb-3 text-xs text-gray-500">
+                                    Structured rationale, evidence, and blockers from the local AI team.
+                                </div>
+                                <div className="max-h-[520px] space-y-3 overflow-y-auto pr-1 scrollbar-thin-cyan">
+                                    {activity.length === 0 ? (
+                                        <Empty text="No AI activity recorded yet. Start the bot or wait for the next scheduled research cycle." />
+                                    ) : activity.map((event) => (
+                                        <TraceRow key={event.id} event={event} debugOpen={debugOpen} />
+                                    ))}
+                                </div>
+                            </div>
+                        </Accordion>
+                    </section>
+
+                    <section className="grid gap-4 xl:grid-cols-[1fr_1fr]">
+                        <Panel title="Learning Memory">
+                            <div className="max-h-[460px] divide-y divide-white/5 overflow-y-auto">
+                                {lessons.length === 0 ? (
+                                    <Empty text="Lessons will appear after wins, losses, blocked triggers, and resets." />
+                                ) : lessons.map((lesson) => (
+                                    <div key={lesson.id} className="px-5 py-4">
+                                        <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                                            <div className="text-sm font-medium text-white">
+                                                {[lesson.symbol, lesson.strategy_name, lesson.outcome.replaceAll("_", " ")].filter(Boolean).join(" / ")}
+                                            </div>
+                                            <div className="text-xs text-gray-500">{formatDate(lesson.created_at)}</div>
+                                        </div>
+                                        <p className="text-sm text-gray-300">{lesson.lesson}</p>
+                                        {lesson.return_pct !== null && (
+                                            <div className="mt-2 text-xs text-gray-500">Return {lesson.return_pct.toFixed(2)}%</div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        </Panel>
+
+                        <Panel title="Reset History">
+                            <div className="max-h-[460px] divide-y divide-white/5 overflow-y-auto">
+                                {resets.length === 0 ? (
+                                    <Empty text="No bankroll resets recorded." />
+                                ) : resets.map((reset) => (
+                                    <div key={reset.id} className="px-5 py-4">
+                                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                                            <div className="font-medium text-white">Reset #{reset.reset_number}</div>
+                                            <div className="text-xs text-gray-500">{formatDate(reset.created_at)}</div>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-3 text-sm">
+                                            <Info label="Equity before" value={formatCurrency(reset.equity_before_reset)} />
+                                            <Info label="Drawdown" value={`${reset.drawdown_pct.toFixed(2)}%`} />
+                                            <Info label="Starting bankroll" value={formatCurrency(reset.starting_bankroll)} />
+                                            <Info label="P/L" value={formatCurrency(reset.realized_pnl)} />
+                                        </div>
+                                        <p className="mt-3 text-sm text-gray-300">{reset.lessons || reset.reason}</p>
+                                    </div>
+                                ))}
+                            </div>
+                        </Panel>
+                    </section>
+                </div>
+            )}
         </main>
     );
 }

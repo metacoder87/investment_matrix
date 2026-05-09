@@ -46,7 +46,13 @@ export function DebugJson({ value, label = "View Debug", className, maxHeight = 
                     className="overflow-auto rounded border border-primary/20 bg-black/70 p-3 font-mono text-[11px] leading-relaxed text-gray-200 scrollbar-thin-cyan"
                     style={{ maxHeight }}
                 >
-                    {JSON.stringify(value, null, 2)}
+                    {(() => {
+                        try {
+                            return JSON.stringify(value, null, 2);
+                        } catch (e) {
+                            return "// Warning: Unparseable object containing circular references.\n" + String(value);
+                        }
+                    })()}
                 </pre>
             )}
         </div>

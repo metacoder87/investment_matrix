@@ -66,6 +66,10 @@
     text-shadow: none;
   }
 
+  .scrollbar-thin-cyan {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(0, 245, 255, 0.35) transparent;
+  }
   .scrollbar-thin-cyan::-webkit-scrollbar {
     width: 6px;
     height: 6px;

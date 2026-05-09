@@ -105,12 +105,25 @@ export function MatrixRain({
         }
 
         const handleResize = () => resize();
+        const handleVisibilityChange = () => {
+            if (document.hidden) {
+                stopped = true;
+                window.cancelAnimationFrame(animationId);
+            } else if (!reduced) {
+                stopped = false;
+                lastFrame = performance.now();
+                animationId = window.requestAnimationFrame(draw);
+            }
+        };
+
         window.addEventListener("resize", handleResize);
+        document.addEventListener("visibilitychange", handleVisibilityChange);
 
         return () => {
             stopped = true;
             window.cancelAnimationFrame(animationId);
             window.removeEventListener("resize", handleResize);
+            document.removeEventListener("visibilitychange", handleVisibilityChange);
         };
     }, [color, columnWidth, frameMs]);
 

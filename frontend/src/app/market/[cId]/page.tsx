@@ -131,7 +131,7 @@ export default function MarketPage() {
     const statusLabel = snapshot?.data_status.status?.replaceAll("_", " ") ?? "loading";
 
     return (
-        <main className="min-h-screen bg-[#050505] p-6 text-gray-200">
+        <div className="min-h-screen p-6 text-gray-200">
             {/* Header / Nav */}
             <div className="mb-8 flex items-center justify-between">
                 <Link
@@ -242,11 +242,35 @@ export default function MarketPage() {
             <div className="mb-8 space-y-4">
                 <div className="flex items-center gap-2">
                     <Activity className="h-5 w-5 text-cyan-400" />
-                    <h2 className="text-xl font-semibold text-white">Price Chart</h2>
+                    <h2 className="font-mono text-xl font-semibold uppercase tracking-wider text-white neon-text">
+                        Price Stream
+                    </h2>
                 </div>
 
-                {/* Candlestick Chart Component */}
-                <CandlestickChart symbol={symbol} exchange="auto" />
+                {/* Candlestick Chart with localized cyberpunk accent.
+                    The global MatrixRain renders behind everything; this
+                    wrapper adds a brighter scoped glow + scanline overlay so
+                    the chart panel reads distinctly "in the matrix". */}
+                <div className="relative isolate overflow-hidden rounded-xl">
+                    {/* Accent layer: radial neon glow */}
+                    <div
+                        aria-hidden
+                        className="pointer-events-none absolute inset-0 -z-10"
+                        style={{
+                            background:
+                                "radial-gradient(ellipse at 20% 0%, rgba(57, 255, 20, 0.18), transparent 55%), radial-gradient(ellipse at 90% 100%, rgba(0, 245, 255, 0.18), transparent 55%)",
+                        }}
+                    />
+                    {/* Scanlines */}
+                    <div
+                        aria-hidden
+                        className="pointer-events-none absolute inset-0 -z-10 bg-scanlines opacity-60"
+                    />
+                    <div className="rounded-xl border border-primary/20 p-2 shadow-neon-cyan">
+                        <CandlestickChart symbol={symbol} exchange="auto" />
+                    </div>
+                </div>
+
                 {snapshot?.known_limitations?.length ? (
                     <div className="rounded-lg border border-yellow-500/20 bg-yellow-500/10 p-3 text-sm text-yellow-100">
                         {snapshot.known_limitations[0]}
@@ -311,6 +335,6 @@ export default function MarketPage() {
                     <SignalCard symbol={symbol} />
                 </div>
             </div>
-        </main>
+        </div>
     );
 }

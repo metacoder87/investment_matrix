@@ -34,7 +34,7 @@ interface OHLCV {
 export default function CandlestickChart({
     symbol,
     exchange = "auto",
-    timeframe = "1m",
+    timeframe = "1h",
 }: CandlestickChartProps) {
     const chartContainerRef = useRef<HTMLDivElement>(null);
     const chartRef = useRef<ReturnType<typeof createChart> | null>(null);
@@ -60,14 +60,16 @@ export default function CandlestickChart({
         try {
             const baseUrl = getApiBaseUrl();
 
-            // Calculate time range based on timeframe
+            // Calculate time range based on timeframe.
+            // Each window targets ~300-1500 bars so the user gets plenty of
+            // candles while staying under the backend's max_points cap.
             const end = new Date();
-            let hoursBack = 24;
-            if (activeTimeframe === "5m") hoursBack = 48;
-            else if (activeTimeframe === "15m") hoursBack = 72;
-            else if (activeTimeframe === "1h") hoursBack = 24 * 7;
-            else if (activeTimeframe === "4h") hoursBack = 24 * 30;
-            else if (activeTimeframe === "1d") hoursBack = 24 * 90;
+            let hoursBack = 24;             // 1m  → 24h  (1,440 bars)
+            if (activeTimeframe === "5m") hoursBack = 24 * 7;       // 7d   (2,016 bars)
+            else if (activeTimeframe === "15m") hoursBack = 24 * 14; // 14d (1,344 bars)
+            else if (activeTimeframe === "1h") hoursBack = 24 * 30;  // 30d (720 bars)
+            else if (activeTimeframe === "4h") hoursBack = 24 * 90;  // 90d (540 bars)
+            else if (activeTimeframe === "1d") hoursBack = 24 * 365; // 365d (365 bars)
 
             const start = new Date(end.getTime() - hoursBack * 60 * 60 * 1000);
 
@@ -125,7 +127,21 @@ export default function CandlestickChart({
             // Fetch indicators
             await fetchIndicators();
 
-            chartRef.current?.timeScale().fitContent();
+            if (chartRef.current && candleData.length > 0) {
+                const totalBars = candleData.length;
+                // Show an approximately 10-minute view by default.
+                // We use a minimum of 12 bars so that higher timeframes don't zoom into just 1 or 2 candles.
+                const tfMinutes: Record<string, number> = { "1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440 };
+                const minutesPerBar = tfMinutes[activeTimeframe] || 1;
+                const desired = Math.max(12, Math.ceil(10 / minutesPerBar));
+                const barsToShow = Math.min(desired, totalBars);
+                chartRef.current.timeScale().setVisibleLogicalRange({
+                    from: Math.max(0, totalBars - barsToShow),
+                    to: totalBars + 2, // small padding on the right
+                });
+            } else {
+                chartRef.current?.timeScale().fitContent();
+            }
             setLastUpdate(new Date());
             setLoading(false);
         } catch (err) {
@@ -367,7 +383,7 @@ export default function CandlestickChart({
     return (
         <div className="space-y-2">
             {/* Timeframe Selector */}
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex gap-1">
                     {timeframeOptions.map((tf) => (
                         <button
@@ -382,8 +398,18 @@ export default function CandlestickChart({
                         </button>
                     ))}
                 </div>
-                <div className="text-xs text-gray-500">
-                    {loading ? "Loading..." : lastUpdate ? `Updated: ${lastUpdate.toLocaleTimeString()}` : ""}
+                <div className="flex items-center gap-3">
+                    <button
+                        type="button"
+                        onClick={() => chartRef.current?.timeScale().fitContent()}
+                        className="rounded border border-white/10 px-2 py-1 text-xs text-gray-400 transition hover:border-cyan-500/40 hover:text-cyan-300"
+                        title="Fit all loaded candles to the chart"
+                    >
+                        Fit all
+                    </button>
+                    <div className="text-xs text-gray-500">
+                        {loading ? "Loading..." : lastUpdate ? `Updated: ${lastUpdate.toLocaleTimeString()}` : ""}
+                    </div>
                 </div>
             </div>
 

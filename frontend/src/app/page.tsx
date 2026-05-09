@@ -1,46 +1,37 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
     Activity,
     AlertTriangle,
     ArrowUpRight,
     Bot,
+    CirclePause,
+    Layers,
     LineChart as LineChartIcon,
     PercentCircle,
+    Play,
     Target,
+    Terminal,
     Wallet,
 } from "lucide-react";
 import { getApiBaseUrl } from "@/utils/api";
 import { cn } from "@/utils/cn";
+import { PositionsTable } from "@/components/dashboard/PositionsTable";
+import { ThesesList } from "@/components/dashboard/ThesesList";
+import { ActivityFeed } from "@/components/dashboard/ActivityFeed";
+import {
+    PortfolioSummary,
+    EquityPoint,
+    Position,
+    ThesisLite,
+    TraceEventLite,
+} from "@/types/dashboard";
 
 /* ---------- Types (mirrors crew/summary endpoint) ---------- */
 
-interface PortfolioSummary {
-    available_bankroll: number;
-    cash_balance: number;
-    invested_value: number;
-    total_equity: number;
-    long_exposure: number;
-    short_exposure: number;
-    realized_pnl: number;
-    unrealized_pnl: number;
-    all_time_pnl: number;
-    current_cycle_pnl: number;
-    drawdown_pct: number;
-    exposure_pct: number;
-    open_positions: number;
-    sleeve_win_rates: Record<"long" | "short", number>;
-}
 
-interface EquityPoint {
-    timestamp: string | null;
-    cash_balance: number;
-    invested_value: number;
-    equity: number;
-    drawdown_pct: number;
-}
 
 const emptySummary: PortfolioSummary = {
     available_bankroll: 0,
@@ -85,16 +76,29 @@ function safeFetch<T>(url: string): Promise<T | null> {
 export default function DashboardPage() {
     const [summary, setSummary] = useState<PortfolioSummary>(emptySummary);
     const [equity, setEquity] = useState<EquityPoint[]>([]);
+    const [positions, setPositions] = useState<Position[]>([]);
+    const [theses, setTheses] = useState<ThesisLite[]>([]);
+    const [activity, setActivity] = useState<TraceEventLite[]>([]);
+    const [botState, setBotState] = useState<string>("unknown");
+    const [busy, setBusy] = useState(false);
     const [loading, setLoading] = useState(true);
+
+    const load = useCallback(async () => {
+        const base = getApiBaseUrl();
+        const [s, e, p, t, a] = await Promise.all([
+            safeFetch<Record<string, unknown>>(`${base}/crew/summary`),
+            safeFetch<EquityPoint[]>(`${base}/crew/portfolio/equity`),
+            safeFetch<Position[]>(`${base}/crew/portfolio/positions`),
+            safeFetch<ThesisLite[]>(`${base}/crew/theses`),
+            safeFetch<TraceEventLite[]>(`${base}/crew/activity?limit=5&debug=false`),
+        ]);
+        return { s, e, p, t, a };
+    }, []);
 
     useEffect(() => {
         let alive = true;
-        const load = async () => {
-            const base = getApiBaseUrl();
-            const [s, e] = await Promise.all([
-                safeFetch<Record<string, unknown>>(`${base}/crew/summary`),
-                safeFetch<EquityPoint[]>(`${base}/crew/portfolio/equity`),
-            ]);
+        const refresh = async () => {
+            const { s, e, p, t, a } = await load();
             if (!alive) return;
             if (s) {
                 const sleeve = (s.sleeve_win_rates ?? {}) as Record<string, unknown>;
@@ -119,15 +123,18 @@ export default function DashboardPage() {
                 });
             }
             if (Array.isArray(e)) setEquity(e);
+            if (Array.isArray(p)) setPositions(p);
+            if (Array.isArray(t)) setTheses(t);
+            if (Array.isArray(a)) setActivity(a);
             setLoading(false);
         };
-        load();
-        const id = window.setInterval(load, 30_000);
+        refresh();
+        const id = window.setInterval(refresh, 30_000);
         return () => {
             alive = false;
             window.clearInterval(id);
         };
-    }, []);
+    }, [load]);
 
     const winRate = useMemo(() => {
         const long = summary.sleeve_win_rates.long;
@@ -223,6 +230,17 @@ export default function DashboardPage() {
                     </div>
                 </div>
             </section>
+
+            {/* Extended Dashboard Components */}
+            <section className="grid gap-4 xl:grid-cols-[2fr_1fr]">
+                <div className="flex flex-col gap-4">
+                    <PositionsTable positions={positions} />
+                    <ThesesList theses={theses} />
+                </div>
+                <div className="h-[600px] xl:h-auto">
+                    <ActivityFeed activity={activity} />
+                </div>
+            </section>
         </div>
     );
 }
@@ -303,34 +321,42 @@ function EquitySpark({
     points: EquityPoint[];
     fallback: PortfolioSummary;
 }) {
-    const series = points.length
-        ? points
-        : [
-              {
-                  timestamp: new Date().toISOString(),
-                  cash_balance: fallback.cash_balance,
-                  invested_value: fallback.invested_value,
-                  equity: fallback.total_equity,
-                  drawdown_pct: fallback.drawdown_pct,
-              },
-          ];
     const w = 720;
     const h = 220;
     const pad = 24;
-    const equity = series.map((p) => num(p.equity));
-    const min = Math.min(...equity, 0);
-    const max = Math.max(...equity, 1);
-    const range = Math.max(max - min, 1);
-    const path = series
-        .map((p, i) => {
-            const x = pad + (i / Math.max(series.length - 1, 1)) * (w - pad * 2);
-            const y = h - pad - ((num(p.equity) - min) / range) * (h - pad * 2);
-            return `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
-        })
-        .join(" ");
-    const areaPath =
-        path +
-        ` L ${(pad + (w - pad * 2)).toFixed(2)} ${(h - pad).toFixed(2)} L ${pad.toFixed(2)} ${(h - pad).toFixed(2)} Z`;
+
+    const { min, max, path, areaPath, seriesEquity } = useMemo(() => {
+        const series = points.length
+            ? points
+            : [
+                  {
+                      timestamp: new Date().toISOString(),
+                      cash_balance: fallback.cash_balance,
+                      invested_value: fallback.invested_value,
+                      equity: fallback.total_equity,
+                      drawdown_pct: fallback.drawdown_pct,
+                  },
+              ];
+
+        const equity = series.map((p) => num(p.equity));
+        const minVal = Math.min(...equity, 0);
+        const maxVal = Math.max(...equity, 1);
+        const range = Math.max(maxVal - minVal, 1);
+
+        const pathStr = series
+            .map((p, i) => {
+                const x = pad + (i / Math.max(series.length - 1, 1)) * (w - pad * 2);
+                const y = h - pad - ((num(p.equity) - minVal) / range) * (h - pad * 2);
+                return `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+            })
+            .join(" ");
+
+        const areaStr =
+            pathStr +
+            ` L ${(pad + (w - pad * 2)).toFixed(2)} ${(h - pad).toFixed(2)} L ${pad.toFixed(2)} ${(h - pad).toFixed(2)} Z`;
+
+        return { min: minVal, max: maxVal, path: pathStr, areaPath: areaStr, seriesEquity: equity };
+    }, [points, fallback]);
 
     return (
         <div>
@@ -363,11 +389,23 @@ function EquitySpark({
                     strokeLinejoin="round"
                     style={{ filter: "drop-shadow(0 0 6px rgba(0,245,255,0.6))" }}
                 />
+                {points.length === 0 && (
+                    <text
+                        x="50%"
+                        y="50%"
+                        dominantBaseline="middle"
+                        textAnchor="middle"
+                        fill="rgba(255,255,255,0.3)"
+                        className="font-mono text-sm uppercase tracking-widest"
+                    >
+                        Waiting for cycle data...
+                    </text>
+                )}
             </svg>
             <div className="mt-3 flex flex-wrap gap-x-6 gap-y-1 font-mono text-xs text-gray-400">
                 <span>
                     <span className="mr-1 inline-block h-2 w-2 rounded-full bg-primary shadow-neon-cyan" />
-                    Equity {formatCurrency(num(equity[equity.length - 1]))}
+                    Equity {formatCurrency(num(seriesEquity[seriesEquity.length - 1]))}
                 </span>
                 <span>Min {formatCurrency(min)}</span>
                 <span>Max {formatCurrency(max)}</span>
