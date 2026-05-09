@@ -10,11 +10,18 @@ SessionLocal = None
 def init_db():
     global engine
     global SessionLocal
-    engine = create_engine(
-        settings.DATABASE_URL,
-        pool_pre_ping=True,
-        echo=False,  # Set to True to see generated SQL
-    )
+    # SQLite (used in tests) does not accept QueuePool kwargs; only set them
+    # for real DBs (Postgres/MySQL/etc.).
+    db_url = (settings.DATABASE_URL or "").lower()
+    pool_kwargs: dict = {"pool_pre_ping": True, "echo": False}
+    if not db_url.startswith("sqlite"):
+        pool_kwargs.update(
+            pool_size=20,
+            max_overflow=20,
+            pool_recycle=1800,
+            pool_timeout=10,
+        )
+    engine = create_engine(settings.DATABASE_URL, **pool_kwargs)
     SessionLocal = sessionmaker(
         autocommit=False,
         autoflush=False,
