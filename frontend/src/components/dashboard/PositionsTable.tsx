@@ -2,12 +2,20 @@ import { Position } from "@/types/dashboard";
 import { cn } from "@/utils/cn";
 import { ArrowUpRight, ArrowDownRight, Target } from "lucide-react";
 
-export function PositionsTable({ positions }: { positions: Position[] }) {
+export function PositionsTable({
+    positions,
+    title = "Active Positions",
+    emptyText = "No Open Positions",
+}: {
+    positions: Position[];
+    title?: string;
+    emptyText?: string;
+}) {
     if (!positions || positions.length === 0) {
         return (
             <div className="neo-card p-5 flex flex-col items-center justify-center min-h-[200px] text-gray-500">
                 <Target className="h-8 w-8 mb-2 opacity-50" />
-                <p className="font-mono text-sm uppercase tracking-widest">No Open Positions</p>
+                <p className="font-mono text-sm uppercase tracking-widest">{emptyText}</p>
             </div>
         );
     }
@@ -17,7 +25,7 @@ export function PositionsTable({ positions }: { positions: Position[] }) {
             <header className="border-b border-white/10 px-5 py-3">
                 <h2 className="flex items-center gap-2 font-mono text-sm uppercase tracking-wider text-white">
                     <Target className="h-4 w-4 text-cyan-400" />
-                    Active Positions
+                    {title}
                 </h2>
             </header>
             <div className="overflow-x-auto">
@@ -70,7 +78,7 @@ export function PositionsTable({ positions }: { positions: Position[] }) {
                                                 ${Math.abs(pos.unrealized_pnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                             </span>
                                             <span className="text-[10px] opacity-70 ml-1">
-                                                ({(pos.return_pct * 100).toFixed(2)}%)
+                                                ({pos.return_pct.toFixed(2)}%)
                                             </span>
                                         </div>
                                     </td>

@@ -1,7 +1,10 @@
 export interface PortfolioSummary {
+    source?: "ai" | "user";
+    portfolio_count?: number;
     available_bankroll: number;
     cash_balance: number;
     invested_value: number;
+    total_cost?: number;
     total_equity: number;
     long_exposure: number;
     short_exposure: number;
@@ -13,6 +16,12 @@ export interface PortfolioSummary {
     exposure_pct: number;
     open_positions: number;
     sleeve_win_rates: Record<"long" | "short", number>;
+    closed_win_rate?: number | null;
+    closed_trade_count?: number;
+    closed_wins?: number;
+    closed_losses?: number;
+    positions?: Position[];
+    recent_orders?: DashboardOrder[];
 }
 
 export interface EquityPoint {
@@ -53,4 +62,19 @@ export interface TraceEventLite {
     exchange: string | null;
     public_summary: string;
     created_at: string | null;
+}
+
+export interface DashboardOrder {
+    id: number;
+    portfolio_id?: number;
+    portfolio_name?: string;
+    symbol: string;
+    exchange: string;
+    side: string;
+    status: string;
+    price: number;
+    amount?: number;
+    quantity?: number;
+    realized_pnl?: number | null;
+    timestamp?: string | null;
 }

@@ -13,6 +13,7 @@ import {
     CandlestickSeries,
     LineSeries,
     HistogramSeries,
+    AreaSeries,
 } from "lightweight-charts";
 import { getApiBaseUrl } from "@/utils/api";
 
@@ -45,7 +46,11 @@ export default function CandlestickChart({
 }: CandlestickChartProps) {
     const chartContainerRef = useRef<HTMLDivElement>(null);
     const chartRef = useRef<ReturnType<typeof createChart> | null>(null);
-    const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+    const seriesRefs = useRef({
+        candlestick: null as ISeriesApi<"Candlestick"> | null,
+        line: null as ISeriesApi<"Line"> | null,
+        area: null as ISeriesApi<"Area"> | null,
+    });
     const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
     const bbUpperRef = useRef<ISeriesApi<"Line"> | null>(null);
     const bbMiddleRef = useRef<ISeriesApi<"Line"> | null>(null);
@@ -55,6 +60,13 @@ export default function CandlestickChart({
     const [error, setError] = useState<string | null>(null);
     const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
     const [activeTimeframe, setActiveTimeframe] = useState(timeframe);
+    const [activeViews, setActiveViews] = useState<Record<string, boolean>>({
+        candlestick: true,
+        line: false,
+        area: false,
+    });
+    const [rawCandles, setRawCandles] = useState<OHLCV[]>([]);
+
     // Mirror activeTimeframe into a ref so the WS handler can read the
     // current value without forcing the WS effect to be torn down and
     // re-opened every time the user clicks a timeframe pill.
@@ -110,45 +122,39 @@ export default function CandlestickChart({
                 return;
             }
 
+            // Save raw candles for view switching
+            setRawCandles(candles);
+
             // Format for lightweight-charts
-            const candleData: CandlestickData<Time>[] = candles.map((c) => ({
-                time: (new Date(c.timestamp).getTime() / 1000) as Time,
-                open: c.open,
-                high: c.high,
-                low: c.low,
-                close: c.close,
-            }));
+            const formatCandle = (c: OHLCV) => ({ time: (new Date(c.timestamp).getTime() / 1000) as Time, open: c.open, high: c.high, low: c.low, close: c.close });
+            const formatValue = (c: OHLCV) => ({ time: (new Date(c.timestamp).getTime() / 1000) as Time, value: c.close });
+
+            const candleData = candles.map(formatCandle).sort((a, b) => (a.time as number) - (b.time as number));
+            const valueData = candles.map(formatValue).sort((a, b) => (a.time as number) - (b.time as number));
 
             const volumeData: HistogramData<Time>[] = candles.map((c) => ({
                 time: (new Date(c.timestamp).getTime() / 1000) as Time,
                 value: c.volume,
                 color: c.close >= c.open ? "rgba(34, 211, 238, 0.5)" : "rgba(244, 114, 182, 0.5)",
             }));
-
-            // Sort by time
-            candleData.sort((a, b) => (a.time as number) - (b.time as number));
             volumeData.sort((a, b) => (a.time as number) - (b.time as number));
 
-            // Update chart
             // Update chart - Ensure chart is still Mounted (chartRef.current not null)
-            if (chartRef.current && candleSeriesRef.current) {
-                candleSeriesRef.current.setData(candleData);
-            }
-            if (chartRef.current && volumeSeriesRef.current) {
-                volumeSeriesRef.current.setData(volumeData);
+            if (chartRef.current) {
+                if (seriesRefs.current.candlestick) seriesRefs.current.candlestick.setData(candleData);
+                if (seriesRefs.current.line) seriesRefs.current.line.setData(valueData);
+                if (seriesRefs.current.area) seriesRefs.current.area.setData(valueData);
+                
+                if (volumeSeriesRef.current) volumeSeriesRef.current.setData(volumeData);
             }
 
             // Fetch indicators
             await fetchIndicators();
 
-            if (chartRef.current && candleData.length > 0) {
-                const totalBars = candleData.length;
-                // Show an approximately 10-minute view by default.
-                // We use a minimum of 12 bars so that higher timeframes don't zoom into just 1 or 2 candles.
-                const tfMinutes: Record<string, number> = { "1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440 };
-                const minutesPerBar = tfMinutes[activeTimeframe] || 1;
-                const desired = Math.max(12, Math.ceil(10 / minutesPerBar));
-                const barsToShow = Math.min(desired, totalBars);
+            if (chartRef.current && candles.length > 0) {
+                const totalBars = candles.length;
+                // Show the 33 most recent candlesticks by default
+                const barsToShow = Math.min(33, totalBars);
                 chartRef.current.timeScale().setVisibleLogicalRange({
                     from: Math.max(0, totalBars - barsToShow),
                     to: totalBars + 2, // small padding on the right
@@ -242,16 +248,7 @@ export default function CandlestickChart({
             },
         });
 
-        // v5 API: pass series type as first argument
-        const candleSeries = chart.addSeries(CandlestickSeries, {
-            upColor: "#22d3ee",
-            downColor: "#f472b6",
-            borderUpColor: "#22d3ee",
-            borderDownColor: "#f472b6",
-            wickUpColor: "#22d3ee",
-            wickDownColor: "#f472b6",
-        });
-        candleSeriesRef.current = candleSeries;
+        // Series are added via activeViews useEffect
 
         // Volume series
         const volumeSeries = chart.addSeries(HistogramSeries, {
@@ -295,7 +292,9 @@ export default function CandlestickChart({
             window.removeEventListener("resize", handleResize);
             chart.remove();
             chartRef.current = null;
-            candleSeriesRef.current = null;
+            seriesRefs.current.candlestick = null;
+            seriesRefs.current.line = null;
+            seriesRefs.current.area = null;
             volumeSeriesRef.current = null;
             bbUpperRef.current = null;
             bbMiddleRef.current = null;
@@ -319,10 +318,59 @@ export default function CandlestickChart({
         });
     }, [activeTimeframe]);
 
-    // Fetch data when timeframe changes
+    // Fetch data when timeframe or chart type changes
     useEffect(() => {
         fetchHistoricalData();
     }, [fetchHistoricalData]);
+
+    // Handle toggling chart types
+    useEffect(() => {
+        if (!chartRef.current) return;
+        const chart = chartRef.current;
+
+        const syncSeries = (
+            key: "candlestick" | "line" | "area",
+            active: boolean,
+            createFn: () => ISeriesApi<any>,
+            formatFn: (c: OHLCV) => any
+        ) => {
+            if (active && !seriesRefs.current[key]) {
+                const newSeries = createFn();
+                seriesRefs.current[key] = newSeries as any;
+                if (rawCandles.length > 0) {
+                    newSeries.setData(rawCandles.map(formatFn).sort((a, b) => (a.time as number) - (b.time as number)));
+                }
+            } else if (!active && seriesRefs.current[key]) {
+                chart.removeSeries(seriesRefs.current[key]!);
+                seriesRefs.current[key] = null;
+            }
+        };
+
+        syncSeries(
+            "candlestick",
+            activeViews.candlestick,
+            () => chart.addSeries(CandlestickSeries, {
+                upColor: "#22d3ee", downColor: "#f472b6",
+                borderUpColor: "#22d3ee", borderDownColor: "#f472b6",
+                wickUpColor: "#22d3ee", wickDownColor: "#f472b6",
+            }),
+            (c) => ({ time: (new Date(c.timestamp).getTime() / 1000) as Time, open: c.open, high: c.high, low: c.low, close: c.close })
+        );
+
+        syncSeries(
+            "line",
+            activeViews.line,
+            () => chart.addSeries(LineSeries, { color: "#22d3ee", lineWidth: 2, crosshairMarkerVisible: true, crosshairMarkerRadius: 4 }),
+            (c) => ({ time: (new Date(c.timestamp).getTime() / 1000) as Time, value: c.close })
+        );
+
+        syncSeries(
+            "area",
+            activeViews.area,
+            () => chart.addSeries(AreaSeries, { lineColor: "#22d3ee", topColor: "rgba(34, 211, 238, 0.4)", bottomColor: "rgba(34, 211, 238, 0.0)", lineWidth: 2, crosshairMarkerVisible: true, crosshairMarkerRadius: 4 }),
+            (c) => ({ time: (new Date(c.timestamp).getTime() / 1000) as Time, value: c.close })
+        );
+    }, [activeViews, rawCandles]);
 
     // Live-candle accumulator (shared between WS-driven and prop-driven modes).
     const liveCandleRef = useRef<{
@@ -340,7 +388,6 @@ export default function CandlestickChart({
     );
 
     const ingestTick = useCallback((price: number, tickTimeSec: number) => {
-        if (!candleSeriesRef.current) return;
         const tf = activeTimeframeRef.current;
         const minutes = tfMinutes[tf] || 1;
         const bucketSeconds = minutes * 60;
@@ -363,13 +410,15 @@ export default function CandlestickChart({
         }
         const next = liveCandleRef.current;
         if (next) {
-            candleSeriesRef.current.update({
-                time: next.time,
-                open: next.open,
-                high: next.high,
-                low: next.low,
-                close: next.close,
-            });
+            if (seriesRefs.current.candlestick) {
+                seriesRefs.current.candlestick.update({ time: next.time, open: next.open, high: next.high, low: next.low, close: next.close });
+            }
+            if (seriesRefs.current.line) {
+                seriesRefs.current.line.update({ time: next.time, value: next.close });
+            }
+            if (seriesRefs.current.area) {
+                seriesRefs.current.area.update({ time: next.time, value: next.close });
+            }
         }
         setLastUpdate(new Date());
     }, [tfMinutes]);
@@ -483,6 +532,21 @@ export default function CandlestickChart({
                                 }`}
                         >
                             {tf.toUpperCase()}
+                        </button>
+                    ))}
+                </div>
+                {/* Chart Type Selector */}
+                <div className="flex gap-1 rounded bg-white/5 p-1">
+                    {(["candlestick", "line", "area"] as const).map((type) => (
+                        <button
+                            key={type}
+                            onClick={() => setActiveViews(prev => ({ ...prev, [type]: !prev[type as keyof typeof prev] }))}
+                            className={`rounded px-3 py-1 text-xs font-medium capitalize transition-colors ${activeViews[type]
+                                ? "bg-white/10 text-white shadow"
+                                : "text-gray-500 hover:text-white"
+                                }`}
+                        >
+                            {type === "candlestick" ? "Candles" : type}
                         </button>
                     ))}
                 </div>

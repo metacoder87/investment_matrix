@@ -42,6 +42,55 @@ class PortfolioSummary(BaseModel):
     unrealized_pnl: float
     holdings: List[HoldingResponse]
 
+class DashboardPositionResponse(BaseModel):
+    symbol: str
+    exchange: str
+    side: str
+    quantity: float
+    avg_entry_price: float
+    last_price: float
+    market_value: float
+    unrealized_pnl: float
+    return_pct: float
+
+class DashboardOrderResponse(BaseModel):
+    id: int
+    portfolio_id: int
+    portfolio_name: str
+    symbol: str
+    exchange: str
+    side: str
+    status: str
+    price: float
+    amount: float
+    realized_pnl: Optional[float] = None
+    timestamp: Optional[str] = None
+
+class PortfolioDashboardResponse(BaseModel):
+    source: str
+    portfolio_count: int
+    available_bankroll: float
+    cash_balance: float
+    invested_value: float
+    total_cost: float
+    total_equity: float
+    long_exposure: float
+    short_exposure: float
+    realized_pnl: float
+    unrealized_pnl: float
+    all_time_pnl: float
+    current_cycle_pnl: float
+    drawdown_pct: float
+    exposure_pct: float
+    open_positions: int
+    sleeve_win_rates: dict[str, float]
+    closed_win_rate: Optional[float]
+    closed_trade_count: int
+    closed_wins: int
+    closed_losses: int
+    positions: List[DashboardPositionResponse]
+    recent_orders: List[DashboardOrderResponse]
+
 
 # --- Endpoints ---
 
@@ -83,6 +132,108 @@ def list_portfolios(
     pfs = db.query(Portfolio).filter(Portfolio.user_id == current_user.id).all()
     return [{"id": p.id, "name": p.name} for p in pfs]
 
+@router.get("/dashboard", response_model=PortfolioDashboardResponse)
+async def get_portfolio_dashboard(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    portfolios = (
+        db.query(Portfolio)
+        .options(joinedload(Portfolio.holdings))
+        .filter(Portfolio.user_id == current_user.id)
+        .order_by(Portfolio.name.asc())
+        .all()
+    )
+    portfolio_ids = [portfolio.id for portfolio in portfolios]
+    holdings = [holding for portfolio in portfolios for holding in portfolio.holdings]
+    price_map = await _latest_price_map([holding.symbol for holding in holdings])
+
+    positions = []
+    total_value = 0.0
+    total_cost = 0.0
+    for holding in holdings:
+        current_price = price_map.get(holding.symbol, 0.0) or float(holding.avg_entry_price or 0.0)
+        quantity = float(holding.quantity or 0.0)
+        avg_entry = float(holding.avg_entry_price or 0.0)
+        market_value = quantity * current_price
+        cost_basis = quantity * avg_entry
+        unrealized = market_value - cost_basis
+        return_pct = ((current_price / avg_entry) - 1.0) * 100 if avg_entry > 0 else 0.0
+
+        total_value += market_value
+        total_cost += cost_basis
+        positions.append(
+            DashboardPositionResponse(
+                symbol=holding.symbol,
+                exchange=holding.exchange,
+                side="long",
+                quantity=quantity,
+                avg_entry_price=avg_entry,
+                last_price=current_price,
+                market_value=market_value,
+                unrealized_pnl=unrealized,
+                return_pct=return_pct,
+            )
+        )
+
+    orders = (
+        db.query(Order, Portfolio.name)
+        .join(Portfolio, Portfolio.id == Order.portfolio_id)
+        .filter(Portfolio.user_id == current_user.id, Order.status == OrderStatus.FILLED)
+        .order_by(Order.timestamp.asc(), Order.id.asc())
+        .all()
+        if portfolio_ids
+        else []
+    )
+    realized_pnl, closed_wins, closed_losses, realized_by_order = _realized_trade_stats([row[0] for row in orders])
+    closed_trade_count = closed_wins + closed_losses
+    closed_win_rate = (closed_wins / closed_trade_count) if closed_trade_count else None
+
+    recent_orders = [
+        DashboardOrderResponse(
+            id=order.id,
+            portfolio_id=order.portfolio_id,
+            portfolio_name=portfolio_name,
+            symbol=order.symbol,
+            exchange=order.exchange,
+            side=order.side.value,
+            status=order.status.value,
+            price=float(order.price or 0.0),
+            amount=float(order.amount or 0.0),
+            realized_pnl=realized_by_order.get(order.id),
+            timestamp=order.timestamp.isoformat() if order.timestamp else None,
+        )
+        for order, portfolio_name in sorted(orders, key=lambda row: (row[0].timestamp, row[0].id), reverse=True)[:10]
+    ]
+
+    unrealized_pnl = total_value - total_cost
+    all_time_pnl = realized_pnl + unrealized_pnl
+    return PortfolioDashboardResponse(
+        source="user",
+        portfolio_count=len(portfolios),
+        available_bankroll=0.0,
+        cash_balance=0.0,
+        invested_value=total_cost,
+        total_cost=total_cost,
+        total_equity=total_value,
+        long_exposure=total_value,
+        short_exposure=0.0,
+        realized_pnl=realized_pnl,
+        unrealized_pnl=unrealized_pnl,
+        all_time_pnl=all_time_pnl,
+        current_cycle_pnl=all_time_pnl,
+        drawdown_pct=0.0,
+        exposure_pct=100.0 if total_value > 0 else 0.0,
+        open_positions=len(positions),
+        sleeve_win_rates={"long": 0.0, "short": 0.0},
+        closed_win_rate=closed_win_rate,
+        closed_trade_count=closed_trade_count,
+        closed_wins=closed_wins,
+        closed_losses=closed_losses,
+        positions=positions,
+        recent_orders=recent_orders,
+    )
+
 @router.get("/{id}", response_model=PortfolioSummary)
 async def get_portfolio(
     id: int,
@@ -104,28 +255,7 @@ async def get_portfolio(
     total_cost = 0.0
 
     if pf.holdings:
-        # Batch fetch prices
-        symbols = [h.symbol for h in pf.holdings]
-        keys = [f"latest:{sym}" for sym in symbols]
-        
-        # Determine exchange-specific keys if possible (naive batching here)
-        # Ideally we'd use h.exchange, but let's stick to simple efficient latest:{symbol}
-        # or specific if recorded. For simplicity, just use latest:{symbol} as primary cache.
-        
-        try:
-            raw_values = await redis_client.mget(keys)
-        except Exception:
-            raw_values = [None] * len(keys)
-        price_map = {}
-        for sym, raw in zip(symbols, raw_values):
-            if raw:
-                try:
-                    data = json.loads(raw)
-                    price_map[sym] = float(data.get("price", 0.0))
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    price_map[sym] = 0.0
-            else:
-                price_map[sym] = 0.0
+        price_map = await _latest_price_map([h.symbol for h in pf.holdings])
 
         for h in pf.holdings:
             current_price = price_map.get(h.symbol, 0.0)
@@ -224,3 +354,60 @@ def create_order(
             
     db.commit()
     return {"status": "created", "order_id": new_order.id}
+
+
+async def _latest_price_map(symbols: list[str]) -> dict[str, float]:
+    keys = [f"latest:{symbol}" for symbol in symbols]
+    try:
+        raw_values = await redis_client.mget(keys)
+    except Exception:
+        raw_values = [None] * len(keys)
+
+    price_map: dict[str, float] = {}
+    for symbol, raw in zip(symbols, raw_values):
+        if raw:
+            try:
+                data = json.loads(raw)
+                price_map[symbol] = float(data.get("price", 0.0))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                price_map[symbol] = 0.0
+        else:
+            price_map[symbol] = 0.0
+    return price_map
+
+
+def _realized_trade_stats(orders: list[Order]) -> tuple[float, int, int, dict[int, float]]:
+    lots: dict[tuple[int, str, str], dict[str, float]] = {}
+    realized_by_order: dict[int, float] = {}
+    realized_total = 0.0
+    wins = 0
+    losses = 0
+
+    for order in sorted(orders, key=lambda item: (item.timestamp, item.id)):
+        key = (order.portfolio_id, order.symbol, order.exchange)
+        lot = lots.setdefault(key, {"quantity": 0.0, "avg_entry_price": 0.0})
+        amount = float(order.amount or 0.0)
+        price = float(order.price or 0.0)
+
+        if order.side == OrderSide.BUY:
+            new_quantity = lot["quantity"] + amount
+            if new_quantity > 0:
+                lot["avg_entry_price"] = (
+                    (lot["quantity"] * lot["avg_entry_price"]) + (amount * price)
+                ) / new_quantity
+            lot["quantity"] = new_quantity
+            continue
+
+        if order.side == OrderSide.SELL and amount > 0:
+            pnl = (price - lot["avg_entry_price"]) * amount
+            realized_by_order[order.id] = pnl
+            realized_total += pnl
+            if pnl > 0:
+                wins += 1
+            else:
+                losses += 1
+            lot["quantity"] = max(0.0, lot["quantity"] - amount)
+            if lot["quantity"] == 0:
+                lot["avg_entry_price"] = 0.0
+
+    return realized_total, wins, losses, realized_by_order
