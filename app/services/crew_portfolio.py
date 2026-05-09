@@ -178,6 +178,40 @@ def record_portfolio_snapshot(db: Session, current_user: User, account: PaperAcc
     return snapshot
 
 
+def maybe_record_portfolio_snapshot(
+    db: Session,
+    current_user: User,
+    account: PaperAccount | None = None,
+    *,
+    min_interval_seconds: int = 300,
+) -> AgentPortfolioSnapshot | None:
+    """
+    Throttled snapshot recorder. Only writes a new row when the most recent
+    snapshot is older than `min_interval_seconds`. Use this from read-only
+    endpoints (e.g. GET /portfolio/summary) so dashboard polling doesn't
+    create one row per request.
+    """
+    account = account or get_or_create_ai_account(db, current_user)
+    last = (
+        db.query(AgentPortfolioSnapshot)
+        .filter(
+            AgentPortfolioSnapshot.user_id == current_user.id,
+            AgentPortfolioSnapshot.account_id == account.id,
+        )
+        .order_by(AgentPortfolioSnapshot.created_at.desc())
+        .first()
+    )
+    if last is not None and last.created_at is not None:
+        from datetime import datetime, timezone
+        last_created = last.created_at
+        if last_created.tzinfo is None:
+            last_created = last_created.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - last_created).total_seconds()
+        if age < min_interval_seconds:
+            return None
+    return record_portfolio_snapshot(db, current_user, account)
+
+
 def equity_curve(db: Session, current_user: User, limit: int = 500) -> list[dict[str, Any]]:
     account = get_or_create_ai_account(db, current_user)
     rows = (

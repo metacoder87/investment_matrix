@@ -22,7 +22,12 @@ from app.models.research import (
 from app.models.user import User
 from app.routers.auth import get_current_user
 from app.models.paper import PaperAccount, PaperPosition
-from app.services.crew_autonomy import dry_run_research_thesis, theses_payload, update_thesis
+from app.services.crew_autonomy import (
+    _thesis_payload,
+    dry_run_research_thesis,
+    theses_payload,
+    update_thesis,
+)
 from app.services.crew_execution import (
     attempt_autonomous_execution,
     audit,
@@ -47,6 +52,7 @@ from app.services.crew_portfolio import (
     equity_curve,
     get_or_create_ai_account,
     lessons,
+    maybe_record_portfolio_snapshot,
     portfolio_summary,
     record_portfolio_snapshot,
     reset_bankroll,
@@ -794,7 +800,10 @@ def get_portfolio_summary(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     summary = portfolio_summary(db, current_user)
-    record_portfolio_snapshot(db, current_user)
+    # Throttled snapshot — only writes a row if the last one is older than
+    # 5 minutes. Previously every dashboard poll wrote a snapshot, which
+    # produced ~2,880 rows/day per active user just from passive viewing.
+    maybe_record_portfolio_snapshot(db, current_user, min_interval_seconds=300)
     db.commit()
     return summary
 
@@ -854,7 +863,9 @@ def patch_thesis(
     thesis = update_thesis(db, current_user, thesis_id, payload.model_dump(exclude_unset=True))
     if not thesis:
         raise HTTPException(status_code=404, detail="Research thesis not found.")
-    return next(item for item in theses_payload(db, current_user, limit=500) if item["id"] == thesis.id)
+    # Serialize the single updated thesis directly instead of re-querying up
+    # to 500 rows just to find it (was an O(N) refetch).
+    return _thesis_payload(thesis)
 
 
 @router.get("/resets")
