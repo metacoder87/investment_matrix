@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { ArrowLeft, TrendingUp, TrendingDown, Activity, BarChart3, Wallet, LineChart, Zap, Bot } from "lucide-react";
@@ -128,6 +128,13 @@ export default function MarketPage() {
     }, []);
 
     const displayedPrice = ticker?.price ?? snapshot?.price ?? null;
+
+    // Forward the page-level Coinbase ticker into CandlestickChart so the
+    // chart doesn't open its own duplicate WebSocket subscription.
+    const chartLastTick = useMemo(
+        () => (ticker ? { price: ticker.price, time: ticker.ts } : null),
+        [ticker]
+    );
     const statusLabel = snapshot?.data_status.status?.replaceAll("_", " ") ?? "loading";
 
     return (
@@ -267,7 +274,7 @@ export default function MarketPage() {
                         className="pointer-events-none absolute inset-0 -z-10 bg-scanlines opacity-60"
                     />
                     <div className="rounded-xl border border-primary/20 p-2 shadow-neon-cyan">
-                        <CandlestickChart symbol={symbol} exchange="auto" />
+                        <CandlestickChart symbol={symbol} exchange="auto" lastTick={chartLastTick} />
                     </div>
                 </div>
 

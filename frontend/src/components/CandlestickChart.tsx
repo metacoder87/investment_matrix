@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
     createChart,
     ColorType,
@@ -20,6 +20,12 @@ interface CandlestickChartProps {
     symbol: string;
     exchange?: string;
     timeframe?: string;
+    /**
+     * Optional live tick to drive the in-progress candle. When provided the
+     * chart will NOT open its own Coinbase WebSocket — useful when a parent
+     * component (e.g. the coin-details page) already owns a ticker stream.
+     */
+    lastTick?: { price: number; time: string | number } | null;
 }
 
 interface OHLCV {
@@ -35,6 +41,7 @@ export default function CandlestickChart({
     symbol,
     exchange = "auto",
     timeframe = "1h",
+    lastTick = null,
 }: CandlestickChartProps) {
     const chartContainerRef = useRef<HTMLDivElement>(null);
     const chartRef = useRef<ReturnType<typeof createChart> | null>(null);
@@ -48,6 +55,13 @@ export default function CandlestickChart({
     const [error, setError] = useState<string | null>(null);
     const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
     const [activeTimeframe, setActiveTimeframe] = useState(timeframe);
+    // Mirror activeTimeframe into a ref so the WS handler can read the
+    // current value without forcing the WS effect to be torn down and
+    // re-opened every time the user clicks a timeframe pill.
+    const activeTimeframeRef = useRef(activeTimeframe);
+    useEffect(() => {
+        activeTimeframeRef.current = activeTimeframe;
+    }, [activeTimeframe]);
 
     const timeframeOptions = ["1m", "5m", "15m", "1h", "4h", "1d"];
 
@@ -208,7 +222,7 @@ export default function CandlestickChart({
             timeScale: {
                 borderColor: "rgba(31, 41, 55, 0.8)",
                 timeVisible: true,
-                secondsVisible: activeTimeframe === "1m",
+                secondsVisible: false,
             },
             rightPriceScale: {
                 borderColor: "rgba(31, 41, 55, 0.8)",
@@ -287,6 +301,22 @@ export default function CandlestickChart({
             bbMiddleRef.current = null;
             bbLowerRef.current = null;
         };
+        // Chart instance is created once per mount. Switching timeframe used
+        // to tear this down and rebuild, causing visible flicker. Now we only
+        // re-fetch data and update timeScale options below.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // Update timeScale options when timeframe changes — without rebuilding chart.
+    useEffect(() => {
+        const chart = chartRef.current;
+        if (!chart) return;
+        chart.applyOptions({
+            timeScale: {
+                timeVisible: true,
+                secondsVisible: activeTimeframe === "1m",
+            },
+        });
     }, [activeTimeframe]);
 
     // Fetch data when timeframe changes
@@ -294,75 +324,133 @@ export default function CandlestickChart({
         fetchHistoricalData();
     }, [fetchHistoricalData]);
 
-    // WebSocket for live updates
+    // Live-candle accumulator (shared between WS-driven and prop-driven modes).
+    const liveCandleRef = useRef<{
+        time: Time;
+        open: number;
+        high: number;
+        low: number;
+        close: number;
+        bucket: number;
+    } | null>(null);
+
+    const tfMinutes: Record<string, number> = useMemo(
+        () => ({ "1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440 }),
+        []
+    );
+
+    const ingestTick = useCallback((price: number, tickTimeSec: number) => {
+        if (!candleSeriesRef.current) return;
+        const tf = activeTimeframeRef.current;
+        const minutes = tfMinutes[tf] || 1;
+        const bucketSeconds = minutes * 60;
+        const bucket = Math.floor(tickTimeSec / bucketSeconds) * bucketSeconds;
+
+        const live = liveCandleRef.current;
+        if (!live || live.bucket !== bucket) {
+            liveCandleRef.current = {
+                time: bucket as Time,
+                open: price,
+                high: price,
+                low: price,
+                close: price,
+                bucket,
+            };
+        } else {
+            live.high = Math.max(live.high, price);
+            live.low = Math.min(live.low, price);
+            live.close = price;
+        }
+        const next = liveCandleRef.current;
+        if (next) {
+            candleSeriesRef.current.update({
+                time: next.time,
+                open: next.open,
+                high: next.high,
+                low: next.low,
+                close: next.close,
+            });
+        }
+        setLastUpdate(new Date());
+    }, [tfMinutes]);
+
+    // Mode A: parent supplies live ticks via the `lastTick` prop. Skip WS.
     useEffect(() => {
-        const ws = new WebSocket("wss://ws-feed.exchange.coinbase.com");
+        if (!lastTick) return;
+        const tickTimeSec =
+            typeof lastTick.time === "number"
+                ? lastTick.time
+                : new Date(lastTick.time).getTime() / 1000;
+        const price = Number(lastTick.price);
+        if (!Number.isFinite(price)) return;
+        ingestTick(price, tickTimeSec);
+    }, [lastTick, ingestTick]);
+
+    // Mode B: open our own Coinbase WS with exponential-backoff reconnect.
+    // Only runs when the parent did NOT pass `lastTick` (avoiding duplicate
+    // sockets when used from coin-details page).
+    useEffect(() => {
+        if (lastTick !== null && lastTick !== undefined) return;
+
         const cbSymbol = normalizedSymbol.replace("-USDT", "-USD");
+        let ws: WebSocket | null = null;
+        let reconnectTimer: number | null = null;
+        let attempt = 0;
+        let cancelled = false;
 
-        // Track the current candle being built
-        let currentCandle: { time: Time; open: number; high: number; low: number; close: number } | null = null;
-        let currentCandleTime: number = 0;
+        const connect = () => {
+            if (cancelled) return;
+            ws = new WebSocket("wss://ws-feed.exchange.coinbase.com");
 
-        // Calculate candle bucket time based on timeframe
-        const getTimeframeBucket = (timestamp: number): number => {
-            const tfMinutes: Record<string, number> = { "1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440 };
-            const minutes = tfMinutes[activeTimeframe] || 1;
-            const bucketSeconds = minutes * 60;
-            return Math.floor(timestamp / bucketSeconds) * bucketSeconds;
+            ws.onopen = () => {
+                attempt = 0; // reset backoff on successful open
+                ws?.send(JSON.stringify({
+                    type: "subscribe",
+                    product_ids: [cbSymbol],
+                    channels: ["ticker"],
+                }));
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === "ticker") {
+                    const price = parseFloat(data.price);
+                    const tickTime = new Date(data.time || Date.now()).getTime() / 1000;
+                    if (!Number.isFinite(price)) return;
+                    ingestTick(price, tickTime);
+                } else if (data.type === "error") {
+                    console.debug("Coinbase WS Error (Chart):", data.message);
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.warn("[CandlestickChart] WebSocket error:", error);
+            };
+
+            ws.onclose = (event) => {
+                if (cancelled) return;
+                // Exponential backoff: 1s, 2s, 4s, ... capped at 30s.
+                const delay = Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5));
+                attempt += 1;
+                console.warn(
+                    `[CandlestickChart] WS closed (code ${event.code}); reconnecting in ${delay}ms`
+                );
+                reconnectTimer = window.setTimeout(connect, delay);
+            };
         };
 
-        ws.onopen = () => {
-            ws.send(JSON.stringify({
-                type: "subscribe",
-                product_ids: [cbSymbol],
-                channels: ["ticker"],
-            }));
-        };
+        connect();
 
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            if (data.type === "ticker" && candleSeriesRef.current) {
-                const price = parseFloat(data.price);
-                const tickTime = new Date(data.time || Date.now()).getTime() / 1000;
-                const bucketTime = getTimeframeBucket(tickTime);
-
-                // If this is a new candle bucket, start fresh
-                if (bucketTime !== currentCandleTime) {
-                    currentCandleTime = bucketTime;
-                    currentCandle = {
-                        time: bucketTime as Time,
-                        open: price,
-                        high: price,
-                        low: price,
-                        close: price,
-                    };
-                } else if (currentCandle) {
-                    // Update existing candle
-                    currentCandle.high = Math.max(currentCandle.high, price);
-                    currentCandle.low = Math.min(currentCandle.low, price);
-                    currentCandle.close = price;
-                }
-
-                if (currentCandle) {
-                    candleSeriesRef.current.update(currentCandle);
-                }
-                setLastUpdate(new Date());
-            } else if (data.type === "error") {
-                console.debug("Coinbase WS Error (Chart):", data.message);
+        return () => {
+            cancelled = true;
+            if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+            try {
+                ws?.close();
+            } catch {
+                /* no-op */
             }
         };
-
-        ws.onerror = (error) => {
-            console.error("[CandlestickChart] WebSocket error:", error);
-        };
-
-        ws.onclose = (event) => {
-            console.warn(`[CandlestickChart] WebSocket closed. Code: ${event.code}`);
-            // Note: Automatic reconnection can be added here if needed
-        };
-
-        return () => ws.close();
-    }, [normalizedSymbol, activeTimeframe]);
+    }, [normalizedSymbol, lastTick, ingestTick]);
 
     if (error) {
         return (
