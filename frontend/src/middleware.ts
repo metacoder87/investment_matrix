@@ -8,7 +8,8 @@ const protectedRoutes = [
     '/paper',
     '/backtests',
     '/settings',
-    '/pipeline'
+    '/pipeline',
+    '/crew'
 ];
 
 // Public routes that don't require authentication
