@@ -1390,7 +1390,7 @@ def _research_run_looks_stale(run: AgentRun, *, now: datetime) -> bool:
         return False
     age_seconds = (now - checkpoint).total_seconds()
     if run.status == "queued":
-        return age_seconds > max(1800, int(settings.CREW_RESEARCH_INTERVAL_SECONDS or 1800))
+        return age_seconds > max(300, int(settings.CREW_RESEARCH_INTERVAL_SECONDS or 300))
     return age_seconds > max(900, int(settings.CREW_LLM_TIMEOUT_SECONDS or 60) * 3)
 
 

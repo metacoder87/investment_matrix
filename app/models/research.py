@@ -47,7 +47,7 @@ class AgentGuardrailProfile(Base):
     autonomous_enabled = Column(Boolean, default=True)
     research_enabled = Column(Boolean, default=False)
     trigger_monitor_enabled = Column(Boolean, default=False)
-    research_interval_seconds = Column(Integer, default=1800)
+    research_interval_seconds = Column(Integer, default=300)
     max_position_pct = Column(Float, default=0.35)
     max_daily_loss_pct = Column(Float, default=0.10)
     max_open_positions = Column(Integer, default=12)

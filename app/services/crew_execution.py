@@ -39,7 +39,7 @@ def guardrail_payload(profile: AgentGuardrailProfile) -> dict[str, Any]:
         "autonomous_enabled": bool(profile.autonomous_enabled),
         "research_enabled": bool(getattr(profile, "research_enabled", False)),
         "trigger_monitor_enabled": bool(getattr(profile, "trigger_monitor_enabled", False)),
-        "research_interval_seconds": int(getattr(profile, "research_interval_seconds", None) or 1800),
+        "research_interval_seconds": int(getattr(profile, "research_interval_seconds", None) or 300),
         "max_position_pct": float(profile.max_position_pct or 0.35),
         "max_daily_loss_pct": float(profile.max_daily_loss_pct or 0.10),
         "max_open_positions": int(profile.max_open_positions or 12),
