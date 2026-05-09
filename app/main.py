@@ -94,7 +94,7 @@ def create_app() -> FastAPI:
     # Parse allowed origins from environment
     allowed_origins = [origin.strip() for origin in settings.ALLOWED_ORIGINS.split(",") if origin.strip()]
     
-    print(f"DEBUG: Setting up CORS Middleware with allow_origins={allowed_origins}")
+    logger.debug("CORS Middleware configured with allow_origins=%s", allowed_origins)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
@@ -381,13 +381,16 @@ def create_app() -> FastAPI:
                         try:
                             await redis_client.setex(signals_cache_key, 300, json.dumps(analysis_map))
                         except Exception as e:
-                            print(f"Failed to cache signals: {e}")
+                            logger.warning("Failed to cache signals: %s", e)
 
                     except asyncio.TimeoutError:
-                        print(f"Batch signal generation timed out for {len(symbols_page)} coins. Returning partial data.")
+                        logger.warning(
+                            "Batch signal generation timed out for %d coins. Returning partial data.",
+                            len(symbols_page),
+                        )
                         # Do not fail request, just show empty signals
                     except Exception as e:
-                        print(f"Batch signal error: {e}")
+                        logger.warning("Batch signal error: %s", e)
                         pass
 
                 payload = []
@@ -468,7 +471,7 @@ def create_app() -> FastAPI:
                     except Exception:
                         pass
             except Exception as e:
-                print(f"Background coin refresh failed: {e}")
+                logger.warning("Background coin refresh failed: %s", e)
 
         try:
             raw = await redis_client.get(cache_key)
@@ -2028,7 +2031,7 @@ def create_app() -> FastAPI:
             }))
         except Exception as e:
             # Non-blocking failure; we don't want to fail the API call if Redis PubSub fails
-            print(f"Failed to trigger dynamic subscription: {e}")
+            logger.warning("Failed to trigger dynamic subscription: %s", e)
 
         # 2. Check Cache (Keyed by Symbol + Timestamp)
         # This ensures we always serve fresh results without re-calculating if data hasn't changed
